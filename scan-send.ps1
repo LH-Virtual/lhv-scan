@@ -47,11 +47,19 @@ function Send-LhvList {
         }
         return @{ ok = $false; message = "$($data.error)" }
     } catch {
-        # The server answered with an error: show its sentence, not a number.
+        # The server answered with an error (a wrong code, for example): show
+        # its sentence, not a number.
+        $problem = $_
         $message = ''
         try {
-            $stream  = $_.Exception.Response.GetResponseStream()
-            $text    = (New-Object IO.StreamReader($stream)).ReadToEnd()
+            # Windows PowerShell has usually read the answer already; then it
+            # is in ErrorDetails. If not, read it from the start of the stream.
+            $text = "$($problem.ErrorDetails.Message)"
+            if (-not $text) {
+                $stream = $problem.Exception.Response.GetResponseStream()
+                if ($stream.CanSeek) { $stream.Position = 0 }
+                $text = (New-Object IO.StreamReader($stream)).ReadToEnd()
+            }
             $message = "$(($text | ConvertFrom-Json).error)"
         } catch { }
         if (-not $message) { $message = 'LH Virtual could not be reached. Check your internet connection, or use "Save as file".' }

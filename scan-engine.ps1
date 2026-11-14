@@ -222,6 +222,10 @@ function Read-LhvManifest([string]$folder) {
 #  faster than opening every sub-folder, so it is tried first. If there is no
 #  list, the folders are searched directly.
 #
+#  The list is written by whoever made the add-on, so it is not trusted: an
+#  entry that points OUT of the add-on folder ("..\..\somewhere else") is
+#  skipped. The tool only ever opens files inside the add-on it is reading.
+#
 #  Input : add-on folder, a regular expression for the file name.
 #  Output: full paths, at most $script:MaxFilesPerAddon of them.
 # -----------------------------------------------------------------------------
@@ -230,10 +234,13 @@ function Get-LhvAddonFiles([string]$folder, [string]$namePattern) {
     $layout = Join-Path $folder 'layout.json'
     if (Test-Path -LiteralPath $layout) {
         try {
+            $inside = [System.IO.Path]::GetFullPath($folder).TrimEnd('\') + '\'
             $list = (Get-Content -LiteralPath $layout -Raw -Encoding UTF8 | ConvertFrom-Json).content
             foreach ($item in $list) {
                 if ("$($item.path)" -match $namePattern) {
-                    $full = Join-Path $folder ("$($item.path)" -replace '/', '\')
+                    $full = [System.IO.Path]::GetFullPath((Join-Path $folder ("$($item.path)" -replace '/', '\')))
+                    # Stay inside the add-on: no "..", no other drive, no network path.
+                    if (-not $full.StartsWith($inside, [System.StringComparison]::OrdinalIgnoreCase)) { continue }
                     if (Test-Path -LiteralPath $full) { $files.Add($full) }
                     if ($files.Count -ge $script:MaxFilesPerAddon) { break }
                 }
@@ -767,6 +774,9 @@ function Save-LhvFixes($fixes, [string]$file = (Get-LhvFixFile)) {
 #  Output: the same entry, now marked certain and fixed.
 # -----------------------------------------------------------------------------
 function Set-LhvFix($entry, [string]$kind, [string[]]$icaos, [string[]]$aircraftTypes) {
+    # Only the three choices of the window are accepted; anything else
+    # (a damaged fixes.json, for example) counts as "not an airport or aircraft".
+    if ($kind -ne 'airport' -and $kind -ne 'aircraft') { $kind = 'mod' }
     $entry.kind          = $kind
     $entry.icaos         = @($icaos | ForEach-Object { "$_".Trim().ToUpper() } | Where-Object { $_ -match '^[A-Z0-9]{3,8}$' })
     $entry.aircraftTypes = @($aircraftTypes | ForEach-Object { "$_".Trim().ToUpper() } | Where-Object { $_ -match '^[A-Z0-9]{2,4}$' })

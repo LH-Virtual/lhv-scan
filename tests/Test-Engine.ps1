@@ -199,6 +199,23 @@ try {
     Assert-Equal (& $is 'zz-eddf-jetway-fix') 'mod||1' '"it is a mod" is remembered too'
     Assert-Equal (Read-LhvFixes (Join-Path $root 'none.json')).Count 0 'no fix file means no fixes'
 
+    # ---- 6b. an add-on must not make the tool read files outside its own folder ---------------
+    $secret = Join-Path $root 'outside'; [void](New-Item -ItemType Directory -Path $secret -Force)
+    New-TestBgl (Join-Path $secret 'other.bgl') @('EDXX') 'old'
+    [IO.File]::WriteAllText((Join-Path $secret 'aircraft.cfg'), 'icao_type_designator = B748')
+    $evil = Join-Path $community 'evil-addon'; [void](New-Item -ItemType Directory -Path $evil -Force)
+    [IO.File]::WriteAllText((Join-Path $evil 'manifest.json'), '{"content_type":"SCENERY","title":"Harmless","creator":"x"}')
+    foreach ($path in '../../outside/other.bgl', '..\..\outside\other.bgl', '../../outside/aircraft.cfg', ((Join-Path $secret 'other.bgl') -replace '\\', '/'), 'sub/../../../outside/other.bgl') {
+        [IO.File]::WriteAllText((Join-Path $evil 'layout.json'), (@{ content = @(@{ path = $path; size = 1; date = 0 }) } | ConvertTo-Json -Depth 4))
+        $read = Read-LhvMsfsAddon $evil 'MSFS 2024' 'community'
+        Assert-Equal "$($read.kind)|$(@($read.icaos) -join ',')|$(@($read.aircraftTypes) -join ',')" 'other||' "a file list entry that leaves the add-on is ignored: $path"
+    }
+    $inside = New-TestAddon $community 'honest-addon' 'SCENERY' 'Honest' ((Get-Filler 20) + @{ 'a\..\b\x.bgl' = { param($p) New-TestBgl $p @('EDDW') 'old' } })
+    Assert-Equal @((Read-LhvMsfsAddon $inside 'MSFS 2024' 'community').icaos) @('EDDW') 'a path that stays inside the add-on still works'
+    $odd = New-LhvEntry 'MSFS 2024' 'community' 'odd'
+    [void](Set-LhvFix $odd 'something-else' @('EDDF') @())
+    Assert-Equal "$($odd.kind)|$(@($odd.icaos).Count)" 'mod|1' 'an unknown kind in a fix counts as not counted'
+
     # ---- 7. the result file -------------------------------------------------------------------
     $text = ConvertTo-LhvAddonFile $again
     $file = $text | ConvertFrom-Json

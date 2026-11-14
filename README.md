@@ -21,7 +21,7 @@ the three files you download are the source code, and you can read every line.
 
 ## How to use it
 
-1. Download the ZIP from your My sim page (or this repository) and unzip it.
+1. Download the ZIP from your My sim page and unzip it. (From this repository: **Code → Download ZIP** gives you the same files.)
 2. Double-click `Start.bat`. The LHV Scan window opens.
 3. Press **Scan now**. The window shows which folder is being read.
 4. Look at the list. Yellow rows need a look: click one and say what it is.

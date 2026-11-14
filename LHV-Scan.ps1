@@ -33,6 +33,8 @@
 #    scan-send.ps1     sends the list                (the only internet use)
 #    LHV-Scan.ps1      this file: the window         (shows, asks, calls the two)
 #  You can open all three with Notepad. Lines starting with # explain.
+#
+#  The source code is public:  https://github.com/LH-Virtual/lhv-scan
 # =============================================================================
 
 param(

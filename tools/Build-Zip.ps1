@@ -35,6 +35,8 @@ The three .ps1 files are the whole tool. You can open them with Notepad:
   scan-engine.ps1   reads your simulator       (never uses the internet)
   scan-send.ps1     sends the list             (the only internet use)
   LHV-Scan.ps1      the window
+
+The source code is public: https://github.com/LH-Virtual/lhv-scan
 '@
 [System.IO.File]::WriteAllText((Join-Path $work 'README.txt'), ($readme -replace "`r?`n", "`r`n"), (New-Object System.Text.UTF8Encoding($false)))
 

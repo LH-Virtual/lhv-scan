@@ -11,7 +11,8 @@
 #  WHAT IS SENT
 #    1. the code you typed (so LH Virtual knows whose list this is)
 #    2. the list - exactly the text that "Show what is sent" displays
-#  Nothing else: no folder paths, no user name, nothing about your PC.
+#  Nothing else: no folder paths, no user name, nothing about your PC apart
+#  from the install date and version of the listed add-ons (in the list).
 # =============================================================================
 
 # The one address this tool ever contacts.

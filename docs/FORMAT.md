@@ -28,7 +28,7 @@ It is plain JSON in UTF-8.
 | `aircraftTypes` | string[] | ICAO type codes (for `aircraft`), for example `A320` |
 | `fixed` | boolean | `true` if the pilot set this with Quick fix |
 | `installed` | string, optional | the day the add-on was installed, `yyyy-MM-dd` (see below) |
-| `version` | string, optional | `package_version` from `manifest.json`, at most 30 characters |
+| `version` | string, optional | `package_version` from `manifest.json` (only when it is a text there), at most 30 characters |
 
 Only add-ons that are clear are listed: the codes were read from the add-on's own files,
 or the pilot fixed them. Everything else is counted in `notListed`.

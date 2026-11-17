@@ -16,7 +16,7 @@ the three files you download are the source code, and you can read every line.
 |---|---|
 | Find your simulators (MSFS 2020, MSFS 2024, X-Plane 11 and 12) | Changes, moves or deletes anything in your simulator |
 | Read, per add-on, what kind it is and which airport or aircraft type is inside | Sends anything before you press **Send to My sim** |
-| Show the list and let you correct unclear add-ons (**Quick fix**) | Sends folder paths, your user name or anything about your PC |
+| Show the list and let you correct unclear add-ons (**Quick fix**) | Sends folder paths, your user name or anything about your PC - apart from the install date and version of each listed add-on |
 | Send the list, or save it as a file, when you say so | Lists your liveries, mods or tools by name (they are only counted) |
 
 ## How to use it
@@ -65,13 +65,26 @@ Add-on managers (Addons Linker, FSDT Addon Manager, ...) keep your add-ons in a 
 of their own and put only the switched-on ones into `Community`, as links. The
 switched-off ones are still installed, so the tool reads them too:
 
-- For every linked add-on in `Community`, the folder that holds the real add-on is an
-  **add-on library**. It is searched up to three folder levels deep.
-- **Add folder** in the window adds a library yourself. It is remembered in
-  `%APPDATA%\LHV-Scan\libraries.json`.
-- An add-on whose folder name is also in `Community` is switched on and was read there;
-  it is counted as *linked*, not read twice. The window shows one line per library, for
-  example `Library: D:\Addons - 212 add-ons, 40 linked`.
+- The links in `Community` show where the library is. The **add-on library** is the
+  deepest folder that all link targets on one drive have in common, at least one level
+  below the drive root. Links to `D:\Addons\Airports\EDDF\...` and
+  `D:\Addons\Aircraft\A320\...` make `D:\Addons` the library, so the switched-off add-ons
+  in `D:\Addons\Aircraft\B738\...` are found as well. Targets with nothing in common
+  below the drive (`D:\Addons\...`, `D:\Games\...`) each give a library of their own:
+  the folder that holds them.
+- A library is searched up to three folder levels deep and at most 5000 folders; the
+  window says so when it stopped early.
+- A simulator folder is never a library: no `Community`, `Community2024` or `Official`
+  folder, and no folder of another simulator on this PC. MSFS 2020 add-ons linked into
+  MSFS 2024 stay MSFS 2020 add-ons.
+- **Add folder** in the window adds a library yourself, for example the top folder of
+  your add-on manager if some of its add-ons are not found. It is remembered in
+  `%APPDATA%\LHV-Scan\libraries.json`. **Remove** on its line in the window forgets it
+  again (the folder itself stays as it is).
+- An add-on that a `Community` link points to, or whose folder name is also in
+  `Community`, is switched on and was read there; it is counted as *linked*, not read
+  twice. The window shows one line per library, for example
+  `Library: D:\Addons - 212 add-ons, 40 linked`.
 
 The tool only reads a library. It never links, moves or changes anything.
 
@@ -116,16 +129,20 @@ your code. The format is described in [docs/FORMAT.md](docs/FORMAT.md). In short
 }
 ```
 
-Two fields per add-on are optional and only there when they are known:
+Besides names and codes, two facts about each **listed** add-on are sent, and only when
+they are known. They are the only things in the list that come from your PC rather than
+from the add-on itself:
 
-- `installed` - the day the add-on was installed (`yyyy-MM-dd`): the date its folder was
+- `installed` - the **install date** (`yyyy-MM-dd`, no time): the date its folder was
   created on your PC. For a linked add-on, the date of the real folder in the library.
   If more than 15 add-ons share one date, that day was a move (a new drive, MSFS 2020 to
   2024), not an install, and the date is left out for all of them.
-- `version` - `package_version` from the add-on's `manifest.json`.
+- `version` - the add-on's **version**, `package_version` from its `manifest.json`.
 
-Add-ons from an add-on library are listed like the ones in `Community`: installed is
-installed, switched on or not. No library path is sent.
+Add-ons from an **add-on library** (switched off in an add-on manager, or in a folder you
+added) are listed like the ones in `Community`: installed is installed. No library path
+and no folder you added is sent. To stop reading a folder you added, press **Remove** on
+its line in the window.
 
 The list goes to one address, `https://lh-virtual.com/api/tours/scan/upload`, together
 with the code from your My sim page. The code is valid for one hour and can only be
@@ -139,8 +156,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Test-Engine.ps1
 
 builds a small made-up simulator folder in the temp folder, lets the engine read it and
 checks the result (both scenery layouts, aircraft, liveries, mods, X-Plane, Quick fix,
-add-on libraries behind a junction, install date and version, the result file). No
-simulator is needed.
+add-on libraries behind junctions, simulator folders that are never libraries, the
+folder limit, renamed links, install date and version, the result file). No simulator is
+needed. The picture above is made from the demo with
+`LHV-Scan.ps1 -Demo -Screenshot docs\window.png` (made-up data only).
 
 `tools\Build-Zip.ps1` packs the download (`LHV-Scan.zip`).
 

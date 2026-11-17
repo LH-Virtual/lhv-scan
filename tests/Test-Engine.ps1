@@ -316,6 +316,90 @@ try {
     Assert-Equal (@($wo.PSObject.Properties.Name | Where-Object { $_ -eq 'installed' -or $_ -eq 'version' }).Count) 0 'installed and version are left out when not known'
     Assert-Equal $file.format 'lhv-addons/2' 'the format name stays the same'
 
+    # ---- 10. a simulator folder is never a library ---------------------------------------------------
+    # MSFS 2020 add-ons linked into the MSFS 2024 Community belong to MSFS 2020.
+    $c20 = Join-Path $root 'Sim20\Community'; $c24 = Join-Path $root 'Sim24\Community'
+    $shared = New-TestAddon $c20 'shared-airport' 'SCENERY' 'Shared' @{ 's\x.bgl' = 'x' }
+    [void](New-TestAddon $c20 'only-2020-airport' 'SCENERY' 'Only 2020' @{ 's\x.bgl' = 'x' })
+    [void](New-Item -ItemType Directory -Path $c24 -Force)
+    $l = Join-Path $c24 'shared-airport'; [void](New-Item -ItemType Junction -Path $l -Target $shared); $links.Add($l)
+    $s20 = @{ id = 'msfs2020'; name = 'MSFS 2020'; places = @(@{ path = $c20; source = 'community'; kind = 'msfs' }) }
+    $s24 = @{ id = 'msfs2024'; name = 'MSFS 2024'; places = @(@{ path = $c24; source = 'community'; kind = 'msfs' }) }
+    Assert-Equal @(Get-LhvLibraries -Simulators @($s24) -AllSimulators @($s20, $s24) -UserFolders @()).Count 0 'a link into the MSFS 2020 Community: no library, even with only MSFS 2024 ticked'
+    Assert-Equal @(Get-LhvLibraries -Simulators @($s24) -UserFolders @()).Count 0 'a folder named Community is never a library, even when its sim is gone'
+    Assert-Equal @(Get-LhvLibraries -Simulators @($s20) -AllSimulators @($s20, $s24) -UserFolders @($c20)).Count 0 'an added folder that is a simulator folder is not a library'
+    # The same, with the 2020 folder found through another spelling (a link on the way).
+    $real20 = Join-Path $root 'Sim20b\AddOnsHere'
+    $other = New-TestAddon $real20 'other-airport' 'SCENERY' 'Other' @{ 's\x.bgl' = 'x' }
+    $alias = Join-Path $root 'Sim20Alias'; [void](New-Item -ItemType Junction -Path $alias -Target (Join-Path $root 'Sim20b')); $links.Add($alias)
+    $c24b = Join-Path $root 'Sim24b\Community'; [void](New-Item -ItemType Directory -Path $c24b -Force)
+    $l = Join-Path $c24b 'other-airport'; [void](New-Item -ItemType Junction -Path $l -Target $other); $links.Add($l)
+    $s20b = @{ id = 'msfs2020'; name = 'MSFS 2020'; places = @(@{ path = (Join-Path $alias 'AddOnsHere'); source = 'community'; kind = 'msfs' }) }
+    $s24b = @{ id = 'msfs2024'; name = 'MSFS 2024'; places = @(@{ path = $c24b; source = 'community'; kind = 'msfs' }) }
+    Assert-Equal (Resolve-LhvRealPath (Join-Path $alias 'AddOnsHere')) (ConvertTo-LhvFolderKey $real20) 'a path through a link is resolved to the real folder'
+    Assert-Equal @(Get-LhvLibraries -Simulators @($s24b) -UserFolders @()).Count 1 '(without MSFS 2020 that folder would be a library)'
+    Assert-Equal @(Get-LhvLibraries -Simulators @($s24b) -AllSimulators @($s20b, $s24b) -UserFolders @()).Count 0 'a simulator folder spelled through a link is still recognised'
+    Assert-Equal @(Get-LhvLibraries -Simulators @($s20) -AllSimulators @($s20, $s24) -UserFolders @($userLib))[0].sim 'MSFS 2024' 'an added folder follows the sims on the PC, not the ticked ones'
+    Assert-Equal (ConvertTo-LhvFolderKey '\\?\C:\Some\Folder\') 'C:\Some\Folder' 'the long-path form and a trailing backslash are normalised'
+
+    # ---- 11. the library is the common folder of the link targets ---------------------------------
+    $tree = Join-Path $root 'Tree'
+    $t1 = New-TestAddon (Join-Path $tree 'Airports\EDDF') 'tree-airport-eddf' 'SCENERY' 'Frankfurt' ((Get-Filler 20) + @{ 's\x.bgl' = { param($p) New-TestBgl $p @('EDDF') 'old' } })
+    $t2 = New-TestAddon (Join-Path $tree 'Aircraft\A320') 'tree-aircraft-a320' 'AIRCRAFT' 'A320' @{ 'SimObjects\Airplanes\X\aircraft.cfg' = 'icao_type_designator = A320' }
+    [void](New-TestAddon (Join-Path $tree 'Aircraft\B738') 'tree-aircraft-b738' 'AIRCRAFT' 'B738' @{ 'SimObjects\Airplanes\X\aircraft.cfg' = 'icao_type_designator = B738' })
+    $l = Join-Path $tree 'loop'; [void](New-Item -ItemType Junction -Path $l -Target $tree); $links.Add($l)       # a link back up: must not count twice
+    $cT = Join-Path $root 'Linked-tree'; [void](New-Item -ItemType Directory -Path $cT -Force)
+    foreach ($t in $t1, $t2) { $l = Join-Path $cT (Split-Path $t -Leaf); [void](New-Item -ItemType Junction -Path $l -Target $t); $links.Add($l) }
+    $sT = @{ id = 'msfs2024'; name = 'MSFS 2024'; places = @(@{ path = $cT; source = 'community'; kind = 'msfs' }) }
+    $libsT = @(Get-LhvLibraries -Simulators @($sT) -UserFolders @())
+    Assert-Equal "$($libsT.Count)|$($libsT[0].path)" "1|$(ConvertTo-LhvFolderKey $tree)" 'links into two category folders: one library, their common folder'
+    $eT = @(Invoke-LhvScan -Simulators @($sT) -Libraries $libsT)
+    $by = @{}; foreach ($e in $eT) { $by[$e.folder] = $e }
+    Assert-Equal "$($by['tree-aircraft-b738'].source)|$(& $is 'tree-aircraft-b738')" 'library|aircraft|B738|1' 'a switched-off add-on in a sibling category folder is found'
+    Assert-Equal "$($libsT[0].addons)|$($libsT[0].linked)|$($libsT[0].stopped)" '3|2|False' 'three add-ons, two linked; a loop back up is not counted again'
+    $g = @(Group-LhvLinkTargets @(@{ target = 'D:\Addons\Airports\x'; sim = 'A' }, @{ target = 'D:\Addons\Aircraft\y'; sim = 'B' }, @{ target = 'D:\Games\z'; sim = 'B' }, @{ target = 'E:\Other\w'; sim = 'A' }, @{ target = 'F:\on-the-drive'; sim = 'A' }) @())
+    Assert-Equal (@($g | ForEach-Object { "$($_.path)=$($_.sim)" } | Sort-Object)) @('D:\Addons=A', 'D:\Games=B', 'E:\Other=A') 'common folder per drive; nothing in common below the drive: each its own library'
+    $g = @(Group-LhvLinkTargets @(@{ target = 'G:\MSFS\Addons\a\x'; sim = 'A' }, @{ target = 'G:\MSFS\Other\y'; sim = 'A' }, @{ target = 'G:\MSFS\Community\z'; sim = 'A' }) @('G:\MSFS\Community'))
+    Assert-Equal (@($g | ForEach-Object { $_.path } | Sort-Object)) @('G:\MSFS\Addons\a', 'G:\MSFS\Other') 'a common folder that holds a simulator folder is split; targets in it are left out'
+
+    # ---- 12. a large library stops at the folder limit and says so -----------------------------------
+    $big = Join-Path $root 'Big'
+    for ($i = 0; $i -lt 60; $i++) { [void][IO.Directory]::CreateDirectory((Join-Path $big ('f{0:D2}' -f $i))) }
+    [void](New-TestAddon $big 'zz-late-addon' 'SCENERY' 'Late' @{ 's\x.bgl' = 'x' })
+    $limit = $script:MaxLibraryFolders
+    try {
+        $script:MaxLibraryFolders = 50
+        $r = Find-LhvLibraryAddons $big
+        Assert-Equal "$($r.stopped)|$($r.visited)|$(@($r.addons).Count)" 'True|50|0' 'the search stops at the folder limit'
+        $libB = @{ path = $big; sim = 'MSFS 2024'; fromUser = $true; exclude = @(); read = $false; addons = 0; linked = 0; stopped = $false }
+        $calls = New-Object System.Collections.Generic.List[string]
+        [void](Invoke-LhvScan -Simulators @() -Libraries @($libB) -OnProgress { param($done, $total, $sim, $folder) $calls.Add("$done/$total|$folder") })
+        Assert-Equal $libB.stopped $true 'the library remembers that the search stopped'
+        Assert-Equal ($calls -contains "0/0|$big") $true 'searching a library is reported as progress (total 0)'
+    } finally {
+        $script:MaxLibraryFolders = $limit
+    }
+    Assert-Equal $script:MaxLibraryFolders 5000 'the folder limit is 5000'
+
+    # ---- 13. a renamed link is still the same add-on --------------------------------------------------
+    $realR = New-TestAddon (Join-Path $root 'LibRenamed') 'real-addon-name' 'SCENERY' 'Real' ((Get-Filler 20) + @{ 's\x.bgl' = { param($p) New-TestBgl $p @('EDDH') 'old' } })
+    $cR = Join-Path $root 'Linked-renamed'; [void](New-Item -ItemType Directory -Path $cR -Force)
+    $l = Join-Path $cR '00-renamed-link'; [void](New-Item -ItemType Junction -Path $l -Target $realR); $links.Add($l)
+    $sR = @{ id = 'msfs2024'; name = 'MSFS 2024'; places = @(@{ path = $cR; source = 'community'; kind = 'msfs' }) }
+    $libsR = @(Get-LhvLibraries -Simulators @($sR) -UserFolders @())
+    $eR = @(Invoke-LhvScan -Simulators @($sR) -Libraries $libsR)
+    Assert-Equal (@($eR | ForEach-Object { $_.folder })) @('00-renamed-link') 'a renamed link: the add-on is read once, from Community'
+    Assert-Equal "$($libsR[0].addons)|$($libsR[0].linked)" '1|1' 'and counted as linked in its library'
+
+    # ---- 14. odd values in the files ------------------------------------------------------------------
+    $oddV = Join-Path $root 'odd-version'; [void](New-Item -ItemType Directory -Path $oddV -Force)
+    foreach ($value in '{"a":1}', '1.5', '["1","2"]', 'null') {
+        [IO.File]::WriteAllText((Join-Path $oddV 'manifest.json'), "{`"content_type`":`"SCENERY`",`"title`":`"x`",`"creator`":`"x`",`"package_version`":$value}")
+        Assert-Equal (Read-LhvManifest $oddV).version '' "a package_version that is not a text gives no version: $value"
+    }
+    [IO.File]::WriteAllText($libFile, '["C:\\Lib", "c:\\lib\\", "C:rel", 5, null, {"a":1}]')
+    Assert-Equal @(Read-LhvLibraryFolders $libFile) @('C:\Lib') 'libraries.json: one entry per folder, only full paths, only texts'
+
     Write-Host "OK: $($script:Checks) checks passed." -ForegroundColor Green
 } finally {
     foreach ($l in $links) { try { [IO.Directory]::Delete($l) } catch { } }

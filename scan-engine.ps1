@@ -51,6 +51,7 @@ $script:PackSize           = 12     # more airports than this = "a pack", not on
 $script:TinyAddonFiles     = 5      # an "airport" with this few files is probably a fix
 $script:ManyTypes          = 8      # more aircraft types than this = traffic models, not one aircraft
 $script:LibraryDepth       = 3      # how many folder levels deep an add-on library is searched
+$script:MaxLibraryFolders  = 5000   # folders looked at per library, at most (a whole drive would take ages)
 $script:MovingDayLimit     = 15     # more add-ons "installed" on one day than this = moved, not installed
 $script:MaxVersionLength   = 30     # longest version text that is kept
 
@@ -216,7 +217,10 @@ function Read-LhvManifest([string]$folder) {
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
         $m = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
-        $version = "$($m.package_version)".Trim()
+        # Only a text counts as a version; a number, list or object written by
+        # mistake would otherwise turn into PowerShell's own text for it.
+        $version = ''
+        if ($m.package_version -is [string]) { $version = $m.package_version.Trim() }
         if ($version.Length -gt $script:MaxVersionLength) { $version = $version.Substring(0, $script:MaxVersionLength) }
         return @{ type    = "$($m.content_type)".ToUpper()
                   title   = "$($m.title)"
@@ -244,6 +248,7 @@ function Get-LhvLinkTarget([string]$folder) {
     try {
         # Quick check first: only links carry the "reparse point" mark (0x400).
         $info = New-Object System.IO.DirectoryInfo($folder)
+        if (-not $info.Exists) { return '' }
         if (([int]$info.Attributes -band 0x400) -eq 0) { return '' }
         $item = Get-Item -LiteralPath $folder -Force
         if ($item.LinkType -ne 'SymbolicLink' -and $item.LinkType -ne 'Junction') { return '' }
@@ -265,9 +270,91 @@ function Get-LhvLinkTarget([string]$folder) {
 #  that two ways of writing the same folder are recognised as one.
 # -----------------------------------------------------------------------------
 function ConvertTo-LhvFolderKey([string]$path) {
-    $full = [System.IO.Path]::GetFullPath($path)
+    $full = [System.IO.Path]::GetFullPath(($path -replace '^\\\\\?\\UNC\\', '\\' -replace '^\\(\\|\?)\?\\', ''))
     if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }     # keep "D:\" as it is
     return $full
+}
+
+# -----------------------------------------------------------------------------
+#  Split-LhvFolder / Join-LhvFolder
+#  A folder path as its ROOT (a drive "D:" or a network share
+#  "\\server\share") and the list of folder names below it, and back.
+#  Used to find the folder that several paths have in common.
+# -----------------------------------------------------------------------------
+function Split-LhvFolder([string]$path) {
+    $root = ''
+    if     ($path -match '^(\\\\[^\\]+\\[^\\]+)') { $root = $matches[1] }
+    elseif ($path -match '^([A-Za-z]:)')           { $root = $matches[1] }
+    $parts = @($path.Substring($root.Length) -split '\\' | Where-Object { $_ })
+    return @{ root = $root; parts = $parts }
+}
+
+function Join-LhvFolder([string]$root, $parts) {
+    $names = @($parts | Where-Object { $_ })
+    if ($names.Count -eq 0) {
+        if ($root -match '^[A-Za-z]:$') { return "$root\" }
+        return $root
+    }
+    return $root + '\' + ($names -join '\')
+}
+
+# -----------------------------------------------------------------------------
+#  Test-LhvInsideFolder
+#  Is $path the folder $folder itself, or somewhere inside it?
+#  (Upper and lower case are the same, as everywhere in Windows.)
+# -----------------------------------------------------------------------------
+function Test-LhvInsideFolder([string]$path, [string]$folder) {
+    $p = $path.TrimEnd('\'); $f = $folder.TrimEnd('\')
+    if ($p.Equals($f, [System.StringComparison]::OrdinalIgnoreCase)) { return $true }
+    return $p.StartsWith($f + '\', [System.StringComparison]::OrdinalIgnoreCase)
+}
+
+# The folder names MSFS uses for its own add-on folders. A folder with one of
+# these names (or anything inside it) is a simulator folder, never a library:
+# its add-ons belong to the simulator it comes from.
+$script:SimFolderNames = '^(Community|Community2024|Official\d*)$'
+
+# -----------------------------------------------------------------------------
+#  Test-LhvSimFolder
+#  Does a path lie in a simulator folder: one of the real places of a
+#  simulator found on this PC ($known), or a folder named like one
+#  (Community, Community2024, Official...) - for example the Community
+#  folder of an MSFS that was uninstalled but kept its add-ons?
+# -----------------------------------------------------------------------------
+function Test-LhvSimFolder([string]$path, [string[]]$known) {
+    foreach ($k in @($known)) { if ($k -and (Test-LhvInsideFolder $path $k)) { return $true } }
+    foreach ($name in @((Split-LhvFolder $path).parts)) { if ($name -match $script:SimFolderNames) { return $true } }
+    return $false
+}
+
+# -----------------------------------------------------------------------------
+#  Resolve-LhvRealPath
+#  The real place of a folder. A path can lead through a link anywhere on
+#  the way (D:\MSFS -> E:\Games\MSFS). This replaces every link on the way by
+#  where it points to, so that two spellings of the same folder compare equal.
+#  (A drive made with "subst" is not resolved; it is rare for add-ons.)
+#
+#  Input : a folder path.
+#  Output: its real full path, or "" if the path is not valid.
+# -----------------------------------------------------------------------------
+function Resolve-LhvRealPath([string]$path) {
+    try { $current = ConvertTo-LhvFolderKey $path } catch { return '' }
+    for ($round = 0; $round -lt 16; $round++) {                    # 16: a stop for links that point in a circle
+        $split = Split-LhvFolder $current
+        $parts = @($split.parts)
+        $changed = $false
+        for ($i = 0; $i -lt $parts.Count; $i++) {
+            $target = Get-LhvLinkTarget (Join-LhvFolder $split.root $parts[0..$i])
+            if (-not $target) { continue }
+            $rest = ''
+            if ($i + 1 -lt $parts.Count) { $rest = '\' + ($parts[($i + 1)..($parts.Count - 1)] -join '\') }
+            $current = ConvertTo-LhvFolderKey ($target.TrimEnd('\') + $rest)
+            $changed = $true
+            break
+        }
+        if (-not $changed) { return $current }
+    }
+    return $current
 }
 
 # -----------------------------------------------------------------------------
@@ -770,68 +857,170 @@ function Get-LhvSimulators {
 #  be missed. They are still installed on your PC, so they are read too.
 #
 #  Two ways a folder becomes a library:
-#    1. A linked add-on in a Community folder points into it: the folder
-#       that CONTAINS the real add-on is the library.
+#    1. Linked add-ons in a Community folder point into it (see
+#       Group-LhvLinkTargets for which folder exactly).
 #    2. You added it yourself ("Add folder" in the window, kept in
 #       %APPDATA%\LHV-Scan\libraries.json). It belongs to MSFS 2024 if that
 #       is on this PC, else to MSFS 2020.
-#  Each library is listed once, even if many links point into it. It belongs
-#  to the simulator whose Community folder linked into it first.
+#  Each library is listed once. It belongs to the simulator whose Community
+#  folder linked into it first.
 #
-#  A whole drive (D:\) is never taken as a library from a link: that would
-#  search the entire drive. You can still add one yourself.
+#  A simulator folder is NEVER a library: no place of any simulator found on
+#  this PC (ticked or not, compared by its real path, see
+#  Resolve-LhvRealPath), and no folder named Community, Community2024 or
+#  Official... Many pilots link their MSFS 2020 add-ons into MSFS 2024; those
+#  add-ons belong to MSFS 2020 and must not show up as MSFS 2024 installs.
+#  Simulator folders INSIDE a library are skipped when it is searched.
 #
-#  Input : -Simulators   the list from Get-LhvSimulators (or a part of it)
-#          -UserFolders  the folders you added (default: libraries.json)
-#  Output: a list of @{ path; sim; fromUser; read; addons; linked }.
-#          read, addons and linked are filled in by Invoke-LhvScan.
+#  Input : -Simulators     the simulators to scan (the ticked ones)
+#          -AllSimulators  every simulator found on this PC (default: the
+#                          same list). Their folders are never libraries, and
+#                          they decide which sim a folder you added belongs to.
+#          -UserFolders    the folders you added (default: libraries.json)
+#  Output: a list of @{ path; sim; fromUser; exclude; read; addons; linked;
+#          stopped }. read, addons, linked and stopped are filled in by
+#          Invoke-LhvScan. exclude are the simulator folders inside it.
 # -----------------------------------------------------------------------------
 function Get-LhvLibraries {
-    param($Simulators, [string[]]$UserFolders = (Read-LhvLibraryFolders))
+    param($Simulators, $AllSimulators = $null, [string[]]$UserFolders = (Read-LhvLibraryFolders))
+    if ($null -eq $AllSimulators) { $AllSimulators = $Simulators }
 
-    $libraries = New-Object System.Collections.Generic.List[object]
-    $known = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
-    # The simulator's own folders are read anyway. They are never a library.
-    foreach ($sim in @($Simulators)) {
+    # The real places of every simulator on this PC, ticked or not.
+    $known = New-Object System.Collections.Generic.List[string]
+    foreach ($sim in (@($AllSimulators) + @($Simulators))) {
         foreach ($place in @($sim.places)) {
-            try { [void]$known.Add((ConvertTo-LhvFolderKey $place.path)) } catch { }
+            if (-not $place) { continue }
+            foreach ($key in @((ConvertTo-LhvFolderKey $place.path), (Resolve-LhvRealPath $place.path))) {
+                if ($key -and -not ($known -contains $key)) { $known.Add($key) }   # -contains ignores case
+            }
         }
+    }
+    $knownList = $known.ToArray()
+    $libraries = New-Object System.Collections.Generic.List[object]
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $newLibrary = {
+        param($path, $sim, $fromUser)
+        $inside = @($knownList | Where-Object { Test-LhvInsideFolder $_ $path })
+        return @{ path = $path; sim = $sim; fromUser = $fromUser; exclude = $inside
+                  read = $false; addons = 0; linked = 0; stopped = $false }
     }
 
     # 1. Libraries behind the links in Community.
+    $targets = New-Object System.Collections.Generic.List[object]
     foreach ($sim in @($Simulators)) {
         foreach ($place in @($sim.places)) {
             if ($place.kind -ne 'msfs' -or $place.source -ne 'community') { continue }
             try { $dirs = [System.IO.Directory]::GetDirectories($place.path) } catch { continue }
             foreach ($dir in $dirs) {
-                $target = Get-LhvLinkTarget $dir
-                if (-not $target) { continue }
-                $parent = Split-Path $target -Parent
-                if (-not $parent -or -not (Split-Path $parent -Parent)) { continue }    # a whole drive
-                if (-not (Test-Path -LiteralPath $parent)) { continue }
-                $key = ConvertTo-LhvFolderKey $parent
-                if ($known.Add($key)) {
-                    $libraries.Add(@{ path = $key; sim = $sim.name; fromUser = $false; read = $false; addons = 0; linked = 0 })
-                }
+                if (-not (Get-LhvLinkTarget $dir)) { continue }
+                $real = Resolve-LhvRealPath $dir
+                if ($real) { $targets.Add(@{ target = $real; sim = $sim.name }) }
             }
         }
     }
+    foreach ($group in @(Group-LhvLinkTargets $targets.ToArray() $knownList)) {
+        if (-not (Test-Path -LiteralPath $group.path -PathType Container)) { continue }
+        if ($keys.Add($group.path)) { $libraries.Add((& $newLibrary $group.path $group.sim $false)) }
+    }
 
-    # 2. The folders you added yourself.
-    $msfs = @(@($Simulators) | Where-Object { $_.id -eq 'msfs2024' }) + @(@($Simulators) | Where-Object { $_.id -eq 'msfs2020' })
+    # 2. The folders you added yourself. Which sim they belong to is decided
+    #    by what is on this PC, not by what is ticked.
+    $msfs = @(@($AllSimulators) | Where-Object { $_.id -eq 'msfs2024' }) + @(@($AllSimulators) | Where-Object { $_.id -eq 'msfs2020' })
     $userSim = $script:LhvNoSimName
     if ($msfs.Count -gt 0) { $userSim = $msfs[0].name }
     foreach ($folder in @($UserFolders)) {
         if (-not $folder) { continue }
         try {
             if (-not (Test-Path -LiteralPath $folder -PathType Container)) { continue }
-            $key = ConvertTo-LhvFolderKey $folder
-            if ($known.Add($key)) {
-                $libraries.Add(@{ path = $key; sim = $userSim; fromUser = $true; read = $false; addons = 0; linked = 0 })
-            }
+            $real = Resolve-LhvRealPath $folder
+            if (-not $real -or (Test-LhvSimFolder $real $knownList)) { continue }   # read as a simulator folder anyway
+            if ($keys.Add($real)) { $libraries.Add((& $newLibrary $real $userSim $true)) }
         } catch { }
     }
     return $libraries.ToArray()
+}
+
+# -----------------------------------------------------------------------------
+#  Group-LhvLinkTargets
+#  Decides WHICH folders are libraries, from the places the links point to.
+#
+#  An add-on manager usually sorts its add-ons into a tree, for example
+#      D:\Addons\Airports\EDDF\<add-on>      (switched on: linked)
+#      D:\Addons\Aircraft\A320\<add-on>      (switched on: linked)
+#      D:\Addons\Aircraft\B738\<add-on>      (switched off: no link)
+#  The library is the deepest folder that ALL link targets on the same drive
+#  have in common - here D:\Addons - so the switched-off add-ons in the
+#  other category folders are found too, and the window shows one line
+#  instead of one per category. The common folder must be at least one
+#  level below the drive root (D:\Addons, never D:\ itself).
+#  Targets that have nothing deeper in common (D:\Addons\... and D:\Games\...)
+#  each form a library of their own, the folder that holds them.
+#  A common folder that CONTAINS a simulator folder (for example
+#  G:\MSFS, which holds G:\MSFS\Community) is not taken either: the targets
+#  are split into the next level below it.
+#  Targets inside a simulator folder are left out (see Test-LhvSimFolder).
+#
+#  It only compares paths: it never opens a folder.
+#
+#  Input : $items  a list of @{ target; sim }: real paths of the link targets
+#          $known  real paths of all simulator folders
+#  Output: a list of @{ path; sim }, one per library. sim is the sim of the
+#          first link that pointed into it.
+# -----------------------------------------------------------------------------
+function Group-LhvLinkTargets($items, [string[]]$known) {
+    # Each target becomes the folder that holds it ("holder").
+    $byRoot = [ordered]@{}
+    foreach ($item in @($items)) {
+        if (-not $item) { continue }
+        $split = Split-LhvFolder $item.target
+        $parts = @($split.parts)
+        if ($parts.Count -lt 2) { continue }                    # an add-on right on a drive: no library
+        $holder = @{ root = $split.root; parts = $parts[0..($parts.Count - 2)]; sim = $item.sim }
+        if (Test-LhvSimFolder (Join-LhvFolder $holder.root $holder.parts) $known) { continue }
+        $rootKey = $split.root.ToLowerInvariant()
+        if (-not $byRoot.Contains($rootKey)) { $byRoot[$rootKey] = New-Object System.Collections.Generic.List[object] }
+        $byRoot[$rootKey].Add($holder)
+    }
+
+    $result = New-Object System.Collections.Generic.List[object]
+    $taken  = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $queue  = New-Object System.Collections.Generic.Queue[object]
+    foreach ($key in $byRoot.Keys) { $queue.Enqueue($byRoot[$key].ToArray()) }
+    while ($queue.Count -gt 0) {
+        $group = $queue.Dequeue()
+        # The folder names all holders in this group share, from the root down.
+        $common = New-Object System.Collections.Generic.List[string]
+        $first = @($group[0].parts)
+        for ($i = 0; $i -lt $first.Count; $i++) {
+            $same = $true
+            foreach ($h in $group) {
+                $p = @($h.parts)
+                if ($p.Count -le $i -or -not $p[$i].Equals($first[$i], [System.StringComparison]::OrdinalIgnoreCase)) { $same = $false; break }
+            }
+            if (-not $same) { break }
+            $common.Add($first[$i])
+        }
+        $path = Join-LhvFolder $group[0].root $common.ToArray()
+        $holdsSim = @($known | Where-Object { $_ -and (Test-LhvInsideFolder $_ $path) }).Count -gt 0
+        if ($common.Count -ge 1 -and -not $holdsSim) {
+            if ($taken.Add($path)) { $result.Add(@{ path = $path; sim = $group[0].sim }) }
+            continue
+        }
+        # Too high (a drive root, or a folder that holds a simulator folder):
+        # split by the next folder name. Holders that are this folder itself
+        # cannot go deeper and are left out.
+        $depth = $common.Count
+        $sub = [ordered]@{}
+        foreach ($h in $group) {
+            $p = @($h.parts)
+            if ($p.Count -le $depth) { continue }
+            $name = $p[$depth].ToLowerInvariant()
+            if (-not $sub.Contains($name)) { $sub[$name] = New-Object System.Collections.Generic.List[object] }
+            $sub[$name].Add($h)
+        }
+        foreach ($name in $sub.Keys) { $queue.Enqueue($sub[$name].ToArray()) }
+    }
+    return $result.ToArray()
 }
 
 # -----------------------------------------------------------------------------
@@ -842,24 +1031,47 @@ function Get-LhvLibraries {
 #  levels deep. It does not look inside an add-on folder: an add-on never
 #  contains another add-on.
 #
-#  Input : the library folder.
-#  Output: full paths of the add-on folders.
+#  Skipped on the way: simulator folders (they are read as such), and links
+#  that lead back to a folder already seen (a loop would count add-ons twice).
+#  At most $script:MaxLibraryFolders folders are looked at; then the search
+#  stops and says so (a library on a whole drive would otherwise take ages).
+#
+#  Input : the library folder, the simulator folders inside it (exclude),
+#          and optionally the progress block of Invoke-LhvScan with the sim
+#          name. Progress is reported as (0, 0, simName, libraryPath) - total
+#          0 means "searching a library" - every 200 folders.
+#  Output: @{ addons = full paths of the add-on folders; stopped = $true if
+#          the folder limit was reached; visited = folders looked at }
 # -----------------------------------------------------------------------------
-function Find-LhvLibraryAddons([string]$library) {
+function Find-LhvLibraryAddons([string]$library, $exclude = @(), [scriptblock]$OnProgress = $null, [string]$sim = '') {
     $found = New-Object System.Collections.Generic.List[string]
+    $skip  = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($e in @($exclude)) { if ($e) { [void]$skip.Add("$e") } }
+    $seen  = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    try { [void]$seen.Add((ConvertTo-LhvFolderKey $library)) } catch { }
+    $visited = 0; $stopped = $false
+    if ($OnProgress) { & $OnProgress 0 0 $sim $library }
     $level = @($library)
-    for ($depth = 1; $depth -le $script:LibraryDepth -and $level.Count -gt 0; $depth++) {
+    :walk for ($depth = 1; $depth -le $script:LibraryDepth -and $level.Count -gt 0; $depth++) {
         $next = New-Object System.Collections.Generic.List[string]
         foreach ($parent in $level) {
             try { $dirs = [System.IO.Directory]::GetDirectories($parent) } catch { continue }
             foreach ($dir in $dirs) {
+                if ($visited -ge $script:MaxLibraryFolders) { $stopped = $true; break walk }
+                $visited++
+                if ($OnProgress -and ($visited % 200) -eq 0) { & $OnProgress 0 0 $sim $library }
+                if ((Split-Path $dir -Leaf) -match $script:SimFolderNames) { continue }
+                $key = Get-LhvLinkTarget $dir
+                if (-not $key) { $key = $dir }
+                if ($skip.Contains($dir) -or $skip.Contains($key)) { continue }
+                if (-not $seen.Add($key)) { continue }
                 if ([System.IO.File]::Exists((Join-Path $dir 'manifest.json'))) { $found.Add($dir) }
                 else { $next.Add($dir) }
             }
         }
         $level = $next.ToArray()
     }
-    return $found.ToArray()
+    return @{ addons = $found.ToArray(); stopped = $stopped; visited = $visited }
 }
 
 # -----------------------------------------------------------------------------
@@ -888,16 +1100,20 @@ function Clear-LhvMovingDay($entries) {
 #  Walks through the given simulators and libraries and reads every add-on
 #  folder.
 #
-#  An add-on in a library whose folder NAME is also in a Community folder is
-#  the same add-on, switched on through a link. It was read from Community
-#  already, so it is only counted as "linked", not read twice.
+#  An add-on in a library that a Community link points to - or whose folder
+#  NAME is also in a Community folder - is the same add-on, switched on
+#  through a link. It was read from Community already, so it is only counted
+#  as "linked", not read twice. (The path check catches links that were
+#  renamed, the name check copies that are not links.)
 #
 #  Input : -Simulators  the list from Get-LhvSimulators (or a part of it)
 #          -Libraries   optional: the list from Get-LhvLibraries. Its
-#                       read, addons and linked are filled in here.
+#                       read, addons, linked and stopped are filled in here.
 #          -OnProgress  optional: a script block called for every folder, with
 #                       (done, total, simName, folderName). The window uses
-#                       it to show what is being read right now.
+#                       it to show what is being read right now. While a
+#                       library is searched it is called with total 0 and
+#                       the library as folderName (see Find-LhvLibraryAddons).
 #  Output: the list of entries (see New-LhvEntry).
 # -----------------------------------------------------------------------------
 function Invoke-LhvScan {
@@ -906,12 +1122,18 @@ function Invoke-LhvScan {
     # First collect all folders, so the progress bar knows the total.
     $jobs = New-Object System.Collections.Generic.List[object]
     $inCommunity = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $linkedTo    = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     foreach ($sim in @($Simulators)) {
         foreach ($place in @($sim.places)) {
             try {
                 foreach ($dir in [System.IO.Directory]::GetDirectories($place.path)) {
                     $jobs.Add(@{ sim = $sim.name; place = $place; dir = $dir })
-                    if ($place.kind -eq 'msfs' -and $place.source -eq 'community') { [void]$inCommunity.Add((Split-Path $dir -Leaf)) }
+                    if ($place.kind -ne 'msfs' -or $place.source -ne 'community') { continue }
+                    [void]$inCommunity.Add((Split-Path $dir -Leaf))
+                    if (@($Libraries).Count -gt 0 -and (Get-LhvLinkTarget $dir)) {
+                        $real = Resolve-LhvRealPath $dir
+                        if ($real) { [void]$linkedTo.Add($real) }
+                    }
                 }
             } catch { }
         }
@@ -924,11 +1146,16 @@ function Invoke-LhvScan {
     foreach ($library in @($Libraries)) {
         if (-not $library) { continue }
         $library.addons = 0; $library.linked = 0
-        foreach ($dir in @(Find-LhvLibraryAddons $library.path)) {
+        $search = Find-LhvLibraryAddons $library.path $library.exclude $OnProgress $library.sim
+        $library.stopped = [bool]$search.stopped
+        foreach ($dir in @($search.addons)) {
             if (-not $seenPaths.Add($dir)) { continue }                        # found through another library already
             $library.addons++
             $name = Split-Path $dir -Leaf
-            if ($inCommunity.Contains($name)) { $library.linked++; continue }  # switched on: read from Community
+            $key  = ConvertTo-LhvFolderKey $dir
+            if ($linkedTo.Contains($key) -or $inCommunity.Contains($name)) {
+                $library.linked++; continue                                    # switched on: read from Community
+            }
             if (-not $seenNames.Add($name)) { continue }                       # the same add-on in two libraries: read once
             $jobs.Add(@{ sim = $library.sim; place = $libraryPlace; dir = $dir })
         }
@@ -1017,19 +1244,22 @@ function Get-LhvLibraryFile {
 
 # -----------------------------------------------------------------------------
 #  Read-LhvLibraryFolders
-#  Loads the folders you added. Anything that is not a full path is ignored.
+#  Loads the folders you added. Anything that is not a full path ("D:\..."
+#  or "\\server\share\...") is ignored. "D:\A" and "D:\a\" count as one.
 #  Output: a list of folder paths (each once).
 # -----------------------------------------------------------------------------
 function Read-LhvLibraryFolders([string]$file = (Get-LhvLibraryFile)) {
     $folders = New-Object System.Collections.Generic.List[string]
+    $keys = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
     if (Test-Path -LiteralPath $file) {
         try {
             $data = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
             foreach ($item in @($data)) {
-                $path = "$item".Trim()
-                if (-not $path -or -not [System.IO.Path]::IsPathRooted($path)) { continue }
-                if (@($folders | Where-Object { $_ -eq $path }).Count -gt 0) { continue }   # -eq ignores case
-                $folders.Add($path)
+                if ($item -isnot [string]) { continue }
+                $path = $item.Trim()
+                if ($path -notmatch '^([A-Za-z]:\\|\\\\[^\\])') { continue }
+                try { $key = ConvertTo-LhvFolderKey $path } catch { continue }
+                if ($keys.Add($key)) { $folders.Add($path) }
             }
         } catch { }
     }
@@ -1095,7 +1325,8 @@ function Use-LhvFixes($entries, $fixes) {
 #  Add-ons from a library are listed like the ones in Community: installed
 #  is installed, switched on or not.
 #
-#  It contains no folder paths, no user name and nothing about your PC.
+#  It contains no folder paths, no user name and nothing about your PC apart
+#  from the install date and version of the listed add-ons.
 #  Liveries, mods, libraries, tools and unclear add-ons are not listed by name.
 #
 #  Input : the entries.

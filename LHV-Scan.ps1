@@ -18,7 +18,8 @@
 #  WHAT THIS TOOL NEVER DOES
 #    - It never changes, moves or deletes anything in your simulator.
 #    - It never sends anything before you press "Send to My sim".
-#    - It never sends folder paths, your user name or anything about your PC.
+#    - It never sends folder paths, your user name or anything about your PC,
+#      apart from the install date and version of each listed add-on.
 #      "Show what is sent" displays the exact text, every time.
 #
 #  THE ONLY INTERNET ADDRESS THIS TOOL EVER CONTACTS
@@ -27,6 +28,7 @@
 #  THE ONLY FILES THIS TOOL EVER WRITES
 #    - the result file, where YOU choose to save it ("Save as file")
 #    - your corrections:  %APPDATA%\LHV-Scan\fixes.json
+#    - the add-on folders you added:  %APPDATA%\LHV-Scan\libraries.json
 #
 #  THREE FILES, ONE JOB EACH (all in this folder)
 #    scan-engine.ps1   reads your simulator          (never uses the internet)
@@ -62,6 +64,7 @@ Add-Type -AssemblyName PresentationFramework, PresentationCore, WindowsBase, Sys
 #  What the tool remembers while the window is open.
 # -----------------------------------------------------------------------------
 $script:Simulators = @()      # from Get-LhvSimulators
+$script:Libraries  = @()      # from Get-LhvLibraries: add-on folders outside the simulator
 $script:Entries    = @()      # the scan result (see New-LhvEntry in scan-engine.ps1)
 $script:Fixes      = @{}      # your corrections, "sim|folder" -> fix
 $script:Filter     = 'all'    # which tab of the result list is shown
@@ -182,11 +185,17 @@ $xaml = @'
             <Button x:Name="ScanButton" Content="Scan now" Style="{StaticResource BtnPrimary}" Padding="14,11" FontSize="14"/>
             <ProgressBar x:Name="Progress" Height="6" Margin="0,10,0,0" Minimum="0" Maximum="100" Foreground="#FFAD00" Background="#E8ECF4" BorderThickness="0" Visibility="Collapsed"/>
             <TextBlock x:Name="ProgressText" Foreground="{StaticResource Muted}" FontSize="12" TextTrimming="CharacterEllipsis" Margin="0,6,0,0" Height="34" TextWrapping="Wrap"/>
-            <Button x:Name="AddFolderButton" Content="Add another add-on folder..." Style="{StaticResource Btn}" Margin="0,4,0,0"/>
+            <Button x:Name="AddFolderButton" Content="Add folder..." Style="{StaticResource Btn}" Margin="0,4,0,0"
+                    ToolTip="A folder where you keep add-ons outside the simulator, for example the library of an add-on manager. It is only read."/>
             <TextBlock Foreground="{StaticResource Muted}" FontSize="11.5" TextWrapping="Wrap" Margin="0,10,0,0"
                        Text="Folder paths stay on this PC. Only the result list is sent, and only when you press Send."/>
           </StackPanel>
-          <ScrollViewer VerticalScrollBarVisibility="Auto"><StackPanel x:Name="SimList"/></ScrollViewer>
+          <ScrollViewer VerticalScrollBarVisibility="Auto">
+            <StackPanel>
+              <StackPanel x:Name="SimList"/>
+              <StackPanel x:Name="LibraryList" Margin="0,8,0,0"/>
+            </StackPanel>
+          </ScrollViewer>
         </DockPanel>
       </Border>
 
@@ -321,7 +330,7 @@ function Find-LhvControl([string]$name) { return $script:Window.FindName($name) 
 
 # Short names for the parts that are used often.
 $ui = @{}
-foreach ($n in 'VersionText','Steps','FoundText','SimList','ScanButton','Progress','ProgressText','AddFolderButton','Tiles',
+foreach ($n in 'VersionText','Steps','FoundText','SimList','LibraryList','ScanButton','Progress','ProgressText','AddFolderButton','Tiles',
                'SearchBox','TabAll','TabAirports','TabAircraft','TabMods','TabLook','Grid','EmptyText','FixPanel','FixName',
                'FixNote','FixKind','FixCodeLabel','FixCodes','FixApply','FixUndo','FixError','ShowButton','SaveButton',
                'CodeBox','SendButton','StatusText') { $ui[$n] = Find-LhvControl $n }
@@ -409,14 +418,52 @@ function Show-LhvSimulators {
         }
     }
     $count = @($script:Simulators).Count
-    if ($count -eq 0) {
+    if ($count -eq 0 -and @($script:Libraries).Count -gt 0) {
+        $ui.FoundText.Text = 'No simulator was found on this PC. The folders you added will be read:'
+    } elseif ($count -eq 0) {
         $ui.FoundText.Text = 'No simulator was found on this PC. You can add an add-on folder yourself.'
     } elseif ($count -eq 1) {
         $ui.FoundText.Text = 'One simulator was found. These folders will be read:'
     } else {
         $ui.FoundText.Text = "$count simulators were found. These folders will be read:"
     }
-    $ui.ScanButton.IsEnabled = ($count -gt 0)
+    $ui.ScanButton.IsEnabled = ($count -gt 0 -or @($script:Libraries).Count -gt 0)
+}
+
+# -----------------------------------------------------------------------------
+#  Show-LhvLibraries
+#  One line per add-on library under the simulators, for example
+#      Library: D:\Addons - 212 add-ons, 40 linked
+#  "linked" are the ones switched on in your add-on manager; they are read
+#  from Community. The others are read from the library itself.
+#  Before the first scan only the folder is shown. A very large folder is
+#  searched only up to a limit; the line then says where it stopped.
+#  A folder you added yourself has a "Remove" link: it forgets the folder
+#  and scans again.
+# -----------------------------------------------------------------------------
+function Show-LhvLibraries {
+    $ui.LibraryList.Children.Clear()
+    foreach ($library in @($script:Libraries)) {
+        $line = New-Object Windows.Controls.TextBlock
+        $text = "Library: $($library.path)"
+        if ($library.read) { $text += " $([char]0x2014) $($library.addons) add-ons, $($library.linked) linked" }
+        if ($library.stopped) { $text += " $([char]0x2026) stopped after $($script:MaxLibraryFolders) folders" }
+        $how = 'Found through linked add-ons in Community.'; if ($library.fromUser) { $how = 'Added by you.' }
+        [void]$line.Inlines.Add((New-Object Windows.Documents.Run($text)))
+        if ($library.fromUser) {
+            $remove = New-Object Windows.Documents.Hyperlink
+            [void]$remove.Inlines.Add((New-Object Windows.Documents.Run('Remove')))
+            $remove.Tag = $library.path
+            $remove.ToolTip = 'Forget this folder (it stays on your PC) and scan again.'
+            $remove.Add_Click({ param($sender) Remove-LhvFolder "$($sender.Tag)" })
+            [void]$line.Inlines.Add((New-Object Windows.Documents.Run('  ')))
+            [void]$line.Inlines.Add($remove)
+        }
+        $line.ToolTip = "$($library.path)`n$how Read for $($library.sim). Only read: nothing is linked, moved or changed."
+        $line.Foreground = New-LhvBrush '#5B6B8C'; $line.FontSize = 11.5
+        $line.TextWrapping = 'Wrap'; $line.Margin = '0,3,0,0'
+        [void]$ui.LibraryList.Children.Add($line)
+    }
 }
 
 # -----------------------------------------------------------------------------
@@ -577,7 +624,20 @@ function Update-LhvResult {
 # -----------------------------------------------------------------------------
 function Start-LhvScanFromWindow {
     $sims = @(Get-LhvChosenSimulators)
-    if ($sims.Count -eq 0) { $ui.ProgressText.Text = 'Tick at least one simulator.'; return }
+    if ($sims.Count -eq 0 -and @($script:Simulators).Count -gt 0) { $ui.ProgressText.Text = 'Tick at least one simulator.'; return }
+
+    # The libraries are looked up again: links may have changed since the start.
+    # The folders of EVERY simulator on this PC are passed too, so that none of
+    # them is taken for a library. Only libraries of the ticked simulators are
+    # read (a folder you added belongs to "no simulator" only when there is no
+    # MSFS on this PC at all).
+    $ui.ProgressText.Text = 'Looking for add-on libraries ...'
+    Update-LhvWindow
+    $chosen = @($sims | ForEach-Object { $_.name })
+    $libraries = @(Get-LhvLibraries -Simulators $sims -AllSimulators $script:Simulators |
+                   Where-Object { ($chosen -contains $_.sim) -or $_.sim -eq $script:LhvNoSimName })
+    $script:Libraries = $libraries
+    Show-LhvLibraries
 
     $ui.ScanButton.IsEnabled = $false; $ui.AddFolderButton.IsEnabled = $false
     $ui.Progress.Visibility = 'Visible'; $ui.Progress.Value = 0
@@ -586,8 +646,15 @@ function Start-LhvScanFromWindow {
     Show-LhvSteps 2 @('', 'Reading ...', '', '')
     Update-LhvWindow
 
-    $script:Entries = @(Invoke-LhvScan -Simulators $sims -OnProgress {
+    $script:Entries = @(Invoke-LhvScan -Simulators $sims -Libraries $libraries -OnProgress {
         param($done, $total, $simName, $folderName)
+        # Total 0: a library is being searched (called every 200 folders).
+        # Keep the window alive and say which one.
+        if ($total -eq 0) {
+            $ui.ProgressText.Text = "Reading library ...`n$folderName"
+            Update-LhvWindow
+            return
+        }
         # Called for every folder: show its name and move the bar.
         $ui.Progress.Value   = [math]::Round(100 * $done / [math]::Max(1, $total))
         $ui.ProgressText.Text = "Reading $done of $total`n$simName  /  $folderName"
@@ -602,21 +669,53 @@ function Start-LhvScanFromWindow {
     $ui.ScanButton.Content  = 'Scan again'
     $ui.ScanButton.Style    = $script:Window.FindResource('Btn')       # the yellow button is now "Send"
     $ui.ScanButton.IsEnabled = $true; $ui.AddFolderButton.IsEnabled = $true
+    Show-LhvLibraries                                                # now with the numbers
     Update-LhvResult
 }
 
 # -----------------------------------------------------------------------------
 #  Add-LhvFolder
-#  "Add another add-on folder": for add-ons kept outside the usual places.
-#  You pick the folder; it is read like an MSFS Community folder.
+#  "Add folder": for add-ons kept outside the simulator, for example in the
+#  library of an add-on manager where the switched-off add-ons stay. You pick
+#  the folder; it is remembered in %APPDATA%\LHV-Scan\libraries.json and read
+#  as a library (up to three folder levels deep). Then the scan runs again.
+#  The folder is only read: nothing is linked, moved or changed.
 # -----------------------------------------------------------------------------
 function Add-LhvFolder {
     $dialog = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dialog.Description = 'Choose a folder that contains add-on folders (for example a second Community folder).'
+    $dialog.Description = 'Choose a folder where you keep add-ons, for example the library of an add-on manager. It is only read: nothing is linked, moved or changed.'
+    $dialog.ShowNewFolderButton = $false
     if ($dialog.ShowDialog() -ne [System.Windows.Forms.DialogResult]::OK) { return }
-    $script:Simulators = @($script:Simulators) + @(@{ id = 'extra'; name = 'Added folder'
-        places = @(@{ path = $dialog.SelectedPath; source = 'community'; kind = 'msfs' }) })
-    Show-LhvSimulators
+    $picked = $dialog.SelectedPath
+    # Already read? (A simulator folder, or a library found through the links.)
+    $alone = @(Get-LhvLibraries -Simulators $script:Simulators -UserFolders @($picked) | Where-Object { $_.fromUser })
+    if ($alone.Count -eq 0) {
+        $ui.ProgressText.Text = "This folder is read already: it is a simulator folder or one of the libraries.`n$picked"
+        return
+    }
+    $folders = @(Read-LhvLibraryFolders)
+    Save-LhvLibraryFolders (@($folders) + @($picked))     # Read-LhvLibraryFolders drops a double entry
+    $script:Libraries = @(Get-LhvLibraries -Simulators $script:Simulators)
+    Show-LhvLibraries
+    $ui.ScanButton.IsEnabled = $true
+    Start-LhvScanFromWindow
+}
+
+# -----------------------------------------------------------------------------
+#  Remove-LhvFolder
+#  The "Remove" link on the line of a folder you added: forgets the folder in
+#  libraries.json and scans again. The folder itself stays as it is.
+#  Input : the library path as shown on the line (its real path).
+# -----------------------------------------------------------------------------
+function Remove-LhvFolder([string]$libraryPath) {
+    if ($Demo) { $ui.ProgressText.Text = 'Demo: nothing is changed.'; return }
+    $keep = @(Read-LhvLibraryFolders | Where-Object { (Resolve-LhvRealPath $_) -ne $libraryPath })   # -ne ignores case
+    Save-LhvLibraryFolders $keep
+    $script:Libraries = @(Get-LhvLibraries -Simulators $script:Simulators)
+    Show-LhvLibraries
+    $ui.ScanButton.IsEnabled = (@($script:Simulators).Count -gt 0 -or @($script:Libraries).Count -gt 0)
+    if ($ui.ScanButton.IsEnabled) { Start-LhvScanFromWindow }
+    else { $script:Entries = @(); $ui.ProgressText.Text = 'The folder was removed.'; Update-LhvResult }
 }
 
 # =============================================================================
@@ -818,6 +917,11 @@ function Get-LhvDemoEntries {
     $list += & $add 'eddf-jetway-fix' 'Frankfurt jetway fix' 'airport' 'Jetways or ground' @('EDDF') @() $false 'Looks like a mod for EDDF, not the airport itself.'
     $list += & $add 'my-home-airfield' 'My home airfield' 'other' 'Scenery without an airport inside' @() @() $false 'Named like an airport, but no airport was found inside. Which airport is it?'
     $list += & $add 'some-airliner-v2' 'Some Airliner' 'aircraft' '' @() @() $false 'The aircraft files do not name a type. Which type is it?'
+    # Install date and version, as a real scan reads them. Amsterdam lies in
+    # the add-on library (switched off in the add-on manager).
+    $list[0].installed = '2026-09-12'; $list[0].version = '1.4.2'
+    $list[2].source = 'library'; $list[2].installed = '2026-03-28'; $list[2].version = '2.1.0'
+    $list[5].version = '3.0.94'
     return $list
 }
 
@@ -844,16 +948,21 @@ foreach ($pair in @(@('TabAll','all'), @('TabAirports','airports'), @('TabAircra
 $script:Fixes = Read-LhvFixes
 if ($Demo) {
     $script:Simulators = @(@{ id = 'msfs2024'; name = 'MSFS 2024 (demo)'; places = @(@{ path = 'D:\MSFS 2024\Community'; source = 'community'; kind = 'msfs' }) })
+    $script:Libraries  = @(@{ path = 'D:\MSFS Addons'; sim = 'MSFS 2024 (demo)'; fromUser = $false; read = $true; addons = 212; linked = 40; stopped = $false },
+                           @{ path = 'E:\Add-ons kept'; sim = 'MSFS 2024 (demo)'; fromUser = $true; read = $true; addons = 18; linked = 0; stopped = $false })
 } else {
     $script:Simulators = @(Get-LhvSimulators)
+    $script:Libraries  = @(Get-LhvLibraries -Simulators $script:Simulators)
 }
 Show-LhvSimulators
+Show-LhvLibraries
 Show-LhvSteps 2 @("$(@($script:Simulators).Count) found", '', '', '')
 Update-LhvResult
 if ($Demo) {
     $script:Entries = @(Get-LhvDemoEntries)
     $ui.ProgressText.Text = 'Demo: a made-up list. Nothing was read.'
     $ui.ScanButton.IsEnabled = $false
+    $ui.AddFolderButton.IsEnabled = $false
     $ui.ScanButton.Style = $script:Window.FindResource('Btn')
     Update-LhvResult
 }

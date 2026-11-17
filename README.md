@@ -16,7 +16,7 @@ the three files you download are the source code, and you can read every line.
 |---|---|
 | Find your simulators (MSFS 2020, MSFS 2024, X-Plane 11 and 12) | Changes, moves or deletes anything in your simulator |
 | Read, per add-on, what kind it is and which airport or aircraft type is inside | Sends anything before you press **Send to My sim** |
-| Show the list and let you correct unclear add-ons (**Quick fix**) | Sends folder paths, your user name or anything about your PC |
+| Show the list and let you correct unclear add-ons (**Quick fix**) | Sends folder paths, your user name or anything about your PC - apart from the install date and version of each listed add-on |
 | Send the list, or save it as a file, when you say so | Lists your liveries, mods or tools by name (they are only counted) |
 
 ## How to use it
@@ -49,12 +49,50 @@ opens the window with a small made-up list.
 |---|---|
 | `UserCfg.opt` (MSFS) | one line: where your add-ons are installed |
 | `x-plane_install_NN.txt` | one line: where X-Plane is installed |
-| `manifest.json` | type, title, maker, creator of an add-on |
+| `manifest.json` | type, title, maker, creator and version (`package_version`) of an add-on |
 | `layout.json` | the list of file names inside an add-on |
 | `*.bgl` | only the airport codes stored in a scenery file |
 | `aircraft.cfg`, `livery.cfg` | aircraft type, title, "this is a livery" |
 | `apt.dat` (X-Plane) | the airport codes of a scenery |
 | `*.acf` (X-Plane) | one line: the aircraft type |
+
+Two facts about folders are read as well: where a linked add-on folder points to, and
+the date an add-on folder was created (the day it was installed).
+
+### Add-on libraries
+
+Add-on managers (Addons Linker, FSDT Addon Manager, ...) keep your add-ons in a folder
+of their own and put only the switched-on ones into `Community`, as links. The
+switched-off ones are still installed, so the tool reads them too:
+
+- The links in `Community` show where the library is. The **add-on library** is the
+  deepest folder that all link targets on one drive have in common, at least one level
+  below the drive root. Links to `D:\Addons\Airports\EDDF\...` and
+  `D:\Addons\Aircraft\A320\...` make `D:\Addons` the library, so the switched-off add-ons
+  in `D:\Addons\Aircraft\B738\...` are found as well. Targets with nothing in common
+  below the drive (`D:\Addons\...`, `D:\Games\...`) each give a library of their own:
+  the folder that holds them.
+- Personal and system folders are never searched this way: not your user folder or
+  `C:\Users`, not Documents, Downloads or Desktop themselves, not Program Files,
+  ProgramData or Windows, and no drive root. If the common folder would be one of these
+  (or above one), each link target's own folder is used instead, and if that is one of
+  them too, there is no library for it - use **Add folder** if you want it read. Folders
+  below them are fine, for example `C:\Program Files (x86)\Addon Manager\MSFS`.
+- A library is searched up to three folder levels deep and at most 5000 folders; the
+  window says so when it stopped early.
+- A simulator folder is never a library: no `Community`, `Community2024` or `Official`
+  folder, and no folder of another simulator on this PC. MSFS 2020 add-ons linked into
+  MSFS 2024 stay MSFS 2020 add-ons.
+- **Add folder** in the window adds a library yourself, for example the top folder of
+  your add-on manager if some of its add-ons are not found. It is remembered in
+  `%APPDATA%\LHV-Scan\libraries.json`. **Remove** on its line in the window forgets it
+  again (the folder itself stays as it is).
+- An add-on that a `Community` link points to, or whose folder name is also in
+  `Community`, is switched on and was read there; it is counted as *linked*, not read
+  twice. The window shows one line per library, for example
+  `Library: D:\Addons - 212 add-ons, 40 linked`.
+
+The tool only reads a library. It never links, moves or changes anything.
 
 ### How an add-on is recognised
 
@@ -84,17 +122,33 @@ your code. The format is described in [docs/FORMAT.md](docs/FORMAT.md). In short
 ```json
 {
   "format": "lhv-addons/2",
-  "tool": "LHV Scan 1.0.0",
+  "tool": "LHV Scan 1.1.0",
   "sims": ["MSFS 2024"],
   "notListed": { "livery": 103, "mod": 21, "unclear": 3 },
   "addons": [
     { "sim": "MSFS 2024", "folder": "aerosoft-airport-eddf-frankfurt", "title": "Frankfurt",
-      "maker": "Aerosoft", "kind": "airport", "icaos": ["EDDF"], "aircraftTypes": [], "fixed": false },
+      "maker": "Aerosoft", "kind": "airport", "icaos": ["EDDF"], "aircraftTypes": [], "fixed": false,
+      "installed": "2026-09-12", "version": "1.4.2" },
     { "sim": "MSFS 2024", "folder": "pmdg-aircraft-77w", "title": "PMDG 777-300ER",
       "maker": "PMDG", "kind": "aircraft", "icaos": [], "aircraftTypes": ["B77W"], "fixed": false }
   ]
 }
 ```
+
+Besides names and codes, two facts about each **listed** add-on are sent, and only when
+they are known. They are the only things in the list that come from your PC rather than
+from the add-on itself:
+
+- `installed` - the **install date** (`yyyy-MM-dd`, no time): the date its folder was
+  created on your PC. For a linked add-on, the date of the real folder in the library.
+  If more than 15 add-ons share one date, that day was a move (a new drive, MSFS 2020 to
+  2024), not an install, and the date is left out for all of them.
+- `version` - the add-on's **version**, `package_version` from its `manifest.json`.
+
+Add-ons from an **add-on library** (switched off in an add-on manager, or in a folder you
+added) are listed like the ones in `Community`: installed is installed. No library path
+and no folder you added is sent. To stop reading a folder you added, press **Remove** on
+its line in the window.
 
 The list goes to one address, `https://lh-virtual.com/api/tours/scan/upload`, together
 with the code from your My sim page. The code is valid for one hour and can only be
@@ -108,7 +162,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Test-Engine.ps1
 
 builds a small made-up simulator folder in the temp folder, lets the engine read it and
 checks the result (both scenery layouts, aircraft, liveries, mods, X-Plane, Quick fix,
-the result file). No simulator is needed.
+add-on libraries behind junctions, simulator folders that are never libraries, the
+folder limit, renamed links, install date and version, the result file). No simulator is
+needed. The picture above is made from the demo with
+`LHV-Scan.ps1 -Demo -Screenshot docs\window.png` (made-up data only).
 
 `tools\Build-Zip.ps1` packs the download (`LHV-Scan.zip`).
 

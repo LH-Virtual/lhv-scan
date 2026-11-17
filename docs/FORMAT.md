@@ -8,7 +8,7 @@ It is plain JSON in UTF-8.
 | Field | Type | Meaning |
 |---|---|---|
 | `format` | string | always `lhv-addons/2` |
-| `tool` | string | name and version of the tool, for example `LHV Scan 1.0.0` |
+| `tool` | string | name and version of the tool, for example `LHV Scan 1.1.0` |
 | `created` | string | when the file was made, UTC, `2026-11-14T12:00:00Z` |
 | `sims` | string[] | names of the simulators that were scanned |
 | `count` | number | how many entries `addons` has |
@@ -27,9 +27,18 @@ It is plain JSON in UTF-8.
 | `icaos` | string[] | airport codes found inside the scenery (for `airport`) |
 | `aircraftTypes` | string[] | ICAO type codes (for `aircraft`), for example `A320` |
 | `fixed` | boolean | `true` if the pilot set this with Quick fix |
+| `installed` | string, optional | the day the add-on was installed, `yyyy-MM-dd` (see below) |
+| `version` | string, optional | `package_version` from `manifest.json` (only when it is a text there), at most 30 characters |
 
 Only add-ons that are clear are listed: the codes were read from the add-on's own files,
 or the pilot fixed them. Everything else is counted in `notListed`.
+
+`installed` and `version` are missing when they are not known (since LHV Scan 1.1.0;
+older receivers ignore them). `installed` is the local creation date of the add-on
+folder; for a linked add-on, of the real folder the link points to. If more than 15
+add-ons share one date, that day was a move, not an install, and the date is left out
+for all of them. Add-ons from an add-on library (switched off in an add-on manager) are
+listed like the ones in `Community`.
 
 ## `notListed`
 

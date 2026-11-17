@@ -328,6 +328,46 @@ function Test-LhvSimFolder([string]$path, [string[]]$known) {
 }
 
 # -----------------------------------------------------------------------------
+#  Get-LhvProtectedFolders
+#  Personal and system folders of this PC that are never searched as an
+#  add-on library found through links (see Group-LhvLinkTargets): your user
+#  folder and the folder above it (C:\Users), Documents, Downloads and
+#  Desktop and the folders that hold them, Program Files (both),
+#  ProgramData and Windows. Only the folder names are asked from Windows;
+#  nothing inside them is opened.
+#  Output: their full paths (each also as its real path, see
+#          Resolve-LhvRealPath).
+# -----------------------------------------------------------------------------
+function Get-LhvProtectedFolders {
+    $list = New-Object System.Collections.Generic.List[string]
+    $add = {
+        param($path)
+        if (-not $path) { return }
+        foreach ($key in @((ConvertTo-LhvFolderKey $path), (Resolve-LhvRealPath $path))) {
+            if ($key -and -not ($list -contains $key)) { $list.Add($key) }      # -contains ignores case
+        }
+    }
+    $userFolder = $env:USERPROFILE
+    $shell = @()
+    if ($userFolder) {
+        & $add $userFolder
+        & $add (Split-Path $userFolder -Parent)                                # C:\Users
+        $shell += (Join-Path $userFolder 'Downloads'), (Join-Path $userFolder 'Documents'), (Join-Path $userFolder 'Desktop')
+    }
+    # Documents and Desktop can be moved elsewhere (for example into OneDrive).
+    foreach ($name in 'MyDocuments', 'Desktop') {
+        try { $shell += [Environment]::GetFolderPath($name) } catch { }
+    }
+    foreach ($folder in $shell) {
+        if (-not $folder) { continue }
+        & $add $folder
+        & $add (Split-Path $folder -Parent)
+    }
+    foreach ($folder in $env:ProgramFiles, ${env:ProgramFiles(x86)}, $env:ProgramW6432, $env:ProgramData, $env:windir) { & $add $folder }
+    return $list.ToArray()
+}
+
+# -----------------------------------------------------------------------------
 #  Resolve-LhvRealPath
 #  The real place of a folder. A path can lead through a link anywhere on
 #  the way (D:\MSFS -> E:\Games\MSFS). This replaces every link on the way by
@@ -960,14 +1000,31 @@ function Get-LhvLibraries {
 #  are split into the next level below it.
 #  Targets inside a simulator folder are left out (see Test-LhvSimFolder).
 #
+#  Personal and system folders are never searched as a library: a folder that
+#  IS or lies ABOVE one of them (see Get-LhvProtectedFolders - your user
+#  folder, C:\Users, Documents, Downloads, Desktop, Program Files, ProgramData,
+#  Windows, a drive root) is rejected. Links into Downloads\A\... and
+#  Documents\B\... would otherwise make your whole user folder a library.
+#  Then each target's own folder is taken instead (Downloads\A, Documents\B),
+#  and if that one is a personal or system folder too, there is no library
+#  for it ("Add folder" in the window still works). Folders BELOW such a
+#  folder are fine: C:\Program Files (x86)\Addon Manager\MSFS is a library.
+#
 #  It only compares paths: it never opens a folder.
 #
-#  Input : $items  a list of @{ target; sim }: real paths of the link targets
-#          $known  real paths of all simulator folders
+#  Input : $items      a list of @{ target; sim }: real paths of the link targets
+#          $known      real paths of all simulator folders
+#          $protected  personal and system folders (default: this PC's)
 #  Output: a list of @{ path; sim }, one per library. sim is the sim of the
 #          first link that pointed into it.
 # -----------------------------------------------------------------------------
-function Group-LhvLinkTargets($items, [string[]]$known) {
+function Group-LhvLinkTargets($items, [string[]]$known, [string[]]$protected = (Get-LhvProtectedFolders)) {
+    # Is $path one of the protected folders, or above one?
+    $tooHigh = {
+        param($path)
+        foreach ($p in @($protected)) { if ($p -and (Test-LhvInsideFolder $p $path)) { return $true } }
+        return $false
+    }
     # Each target becomes the folder that holds it ("holder").
     $byRoot = [ordered]@{}
     foreach ($item in @($items)) {
@@ -1002,6 +1059,17 @@ function Group-LhvLinkTargets($items, [string[]]$known) {
         }
         $path = Join-LhvFolder $group[0].root $common.ToArray()
         $holdsSim = @($known | Where-Object { $_ -and (Test-LhvInsideFolder $_ $path) }).Count -gt 0
+        if (& $tooHigh $path) {
+            # A personal or system folder (or above one): each target's own
+            # folder instead, unless that one is too high as well.
+            foreach ($h in $group) {
+                $own = Join-LhvFolder $h.root $h.parts
+                if (& $tooHigh $own) { continue }
+                if (@($known | Where-Object { $_ -and (Test-LhvInsideFolder $_ $own) }).Count -gt 0) { continue }
+                if ($taken.Add($own)) { $result.Add(@{ path = $own; sim = $h.sim }) }
+            }
+            continue
+        }
         if ($common.Count -ge 1 -and -not $holdsSim) {
             if ($taken.Add($path)) { $result.Add(@{ path = $path; sim = $group[0].sim }) }
             continue

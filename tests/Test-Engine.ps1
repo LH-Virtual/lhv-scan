@@ -362,6 +362,25 @@ try {
     $g = @(Group-LhvLinkTargets @(@{ target = 'G:\MSFS\Addons\a\x'; sim = 'A' }, @{ target = 'G:\MSFS\Other\y'; sim = 'A' }, @{ target = 'G:\MSFS\Community\z'; sim = 'A' }) @('G:\MSFS\Community'))
     Assert-Equal (@($g | ForEach-Object { $_.path } | Sort-Object)) @('G:\MSFS\Addons\a', 'G:\MSFS\Other') 'a common folder that holds a simulator folder is split; targets in it are left out'
 
+    # Personal and system folders are never a library found through links.
+    $prot = @('C:\Users', 'C:\Users\pilot', 'C:\Users\pilot\Downloads', 'C:\Users\pilot\Documents', 'C:\Users\pilot\Desktop',
+              'C:\Program Files', 'C:\Program Files (x86)', 'C:\ProgramData', 'C:\Windows')
+    $g = @(Group-LhvLinkTargets @(@{ target = 'C:\Users\pilot\Downloads\Addons\x'; sim = 'A' }, @{ target = 'C:\Users\pilot\Documents\MSFS\y'; sim = 'A' }) @() $prot)
+    Assert-Equal (@($g | ForEach-Object { $_.path } | Sort-Object)) @('C:\Users\pilot\Documents\MSFS', 'C:\Users\pilot\Downloads\Addons') 'links into Downloads and Documents: two libraries, never the user folder'
+    $g = @(Group-LhvLinkTargets @(@{ target = 'C:\Program Files (x86)\Addon Manager\MSFS\fsdreamteam-gsx-pro'; sim = 'A' }, @{ target = 'C:\Program Files (x86)\Addon Manager\MSFS\fsdreamteam-airport-lfsb'; sim = 'A' }) @() $prot)
+    Assert-Equal (@($g | ForEach-Object { $_.path })) @('C:\Program Files (x86)\Addon Manager\MSFS') 'a folder below Program Files (x86) is still a library'
+    $g = @(Group-LhvLinkTargets @(@{ target = 'C:\Program Files (x86)\Addon Manager\MSFS\a'; sim = 'A' }, @{ target = 'C:\Program Files (x86)\Other Tool\b'; sim = 'A' }) @() $prot)
+    Assert-Equal (@($g | ForEach-Object { $_.path } | Sort-Object)) @('C:\Program Files (x86)\Addon Manager\MSFS', 'C:\Program Files (x86)\Other Tool') 'common folder Program Files (x86) is rejected: each target''s own folder'
+    $g = @(Group-LhvLinkTargets @(@{ target = 'C:\Users\pilot\Downloads\some-addon'; sim = 'A' }, @{ target = 'C:\Users\pilot\Desktop\other-addon'; sim = 'A' }, @{ target = 'C:\Windows\x'; sim = 'A' }) @() $prot)
+    Assert-Equal @($g).Count 0 'an add-on right in Downloads, Desktop or Windows: no library (Add folder still works)'
+    $g = @(Group-LhvLinkTargets @(@{ target = 'C:\Users\pilot\Downloads\some-addon'; sim = 'A' }, @{ target = 'C:\Addons\Aircraft\y'; sim = 'B' }) @() $prot)
+    Assert-Equal (@($g | ForEach-Object { "$($_.path)=$($_.sim)" })) @('C:\Addons\Aircraft=B') 'a drive root is rejected; a target''s own folder outside the personal folders is kept'
+    $mine = @(Get-LhvProtectedFolders)
+    Assert-Equal (@((ConvertTo-LhvFolderKey $env:USERPROFILE), (ConvertTo-LhvFolderKey (Split-Path $env:USERPROFILE -Parent)), (ConvertTo-LhvFolderKey ${env:ProgramFiles(x86)}), (ConvertTo-LhvFolderKey $env:windir)) | Where-Object { $mine -notcontains $_ }).Count 0 'this PC''s user folder, C:\Users, Program Files (x86) and Windows are protected'
+    $g = @(Group-LhvLinkTargets @(@{ target = (Join-Path $env:USERPROFILE 'Downloads\A\x'); sim = 'A' }, @{ target = (Join-Path $env:USERPROFILE 'Documents\B\y'); sim = 'A' }) @())
+    Assert-Equal (@($g | Where-Object { $_.path -eq (ConvertTo-LhvFolderKey $env:USERPROFILE) }).Count) 0 'with this PC''s folders: the user folder is never a library'
+    Assert-Equal @($g).Count 2 '... but the two folders below Downloads and Documents are'
+
     # ---- 12. a large library stops at the folder limit and says so -----------------------------------
     $big = Join-Path $root 'Big'
     for ($i = 0; $i -lt 60; $i++) { [void][IO.Directory]::CreateDirectory((Join-Path $big ('f{0:D2}' -f $i))) }

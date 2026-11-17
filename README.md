@@ -72,6 +72,12 @@ switched-off ones are still installed, so the tool reads them too:
   in `D:\Addons\Aircraft\B738\...` are found as well. Targets with nothing in common
   below the drive (`D:\Addons\...`, `D:\Games\...`) each give a library of their own:
   the folder that holds them.
+- Personal and system folders are never searched this way: not your user folder or
+  `C:\Users`, not Documents, Downloads or Desktop themselves, not Program Files,
+  ProgramData or Windows, and no drive root. If the common folder would be one of these
+  (or above one), each link target's own folder is used instead, and if that is one of
+  them too, there is no library for it - use **Add folder** if you want it read. Folders
+  below them are fine, for example `C:\Program Files (x86)\Addon Manager\MSFS`.
 - A library is searched up to three folder levels deep and at most 5000 folders; the
   window says so when it stopped early.
 - A simulator folder is never a library: no `Community`, `Community2024` or `Official`

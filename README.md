@@ -49,12 +49,31 @@ opens the window with a small made-up list.
 |---|---|
 | `UserCfg.opt` (MSFS) | one line: where your add-ons are installed |
 | `x-plane_install_NN.txt` | one line: where X-Plane is installed |
-| `manifest.json` | type, title, maker, creator of an add-on |
+| `manifest.json` | type, title, maker, creator and version (`package_version`) of an add-on |
 | `layout.json` | the list of file names inside an add-on |
 | `*.bgl` | only the airport codes stored in a scenery file |
 | `aircraft.cfg`, `livery.cfg` | aircraft type, title, "this is a livery" |
 | `apt.dat` (X-Plane) | the airport codes of a scenery |
 | `*.acf` (X-Plane) | one line: the aircraft type |
+
+Two facts about folders are read as well: where a linked add-on folder points to, and
+the date an add-on folder was created (the day it was installed).
+
+### Add-on libraries
+
+Add-on managers (Addons Linker, FSDT Addon Manager, ...) keep your add-ons in a folder
+of their own and put only the switched-on ones into `Community`, as links. The
+switched-off ones are still installed, so the tool reads them too:
+
+- For every linked add-on in `Community`, the folder that holds the real add-on is an
+  **add-on library**. It is searched up to three folder levels deep.
+- **Add folder** in the window adds a library yourself. It is remembered in
+  `%APPDATA%\LHV-Scan\libraries.json`.
+- An add-on whose folder name is also in `Community` is switched on and was read there;
+  it is counted as *linked*, not read twice. The window shows one line per library, for
+  example `Library: D:\Addons - 212 add-ons, 40 linked`.
+
+The tool only reads a library. It never links, moves or changes anything.
 
 ### How an add-on is recognised
 
@@ -84,17 +103,29 @@ your code. The format is described in [docs/FORMAT.md](docs/FORMAT.md). In short
 ```json
 {
   "format": "lhv-addons/2",
-  "tool": "LHV Scan 1.0.0",
+  "tool": "LHV Scan 1.1.0",
   "sims": ["MSFS 2024"],
   "notListed": { "livery": 103, "mod": 21, "unclear": 3 },
   "addons": [
     { "sim": "MSFS 2024", "folder": "aerosoft-airport-eddf-frankfurt", "title": "Frankfurt",
-      "maker": "Aerosoft", "kind": "airport", "icaos": ["EDDF"], "aircraftTypes": [], "fixed": false },
+      "maker": "Aerosoft", "kind": "airport", "icaos": ["EDDF"], "aircraftTypes": [], "fixed": false,
+      "installed": "2026-09-12", "version": "1.4.2" },
     { "sim": "MSFS 2024", "folder": "pmdg-aircraft-77w", "title": "PMDG 777-300ER",
       "maker": "PMDG", "kind": "aircraft", "icaos": [], "aircraftTypes": ["B77W"], "fixed": false }
   ]
 }
 ```
+
+Two fields per add-on are optional and only there when they are known:
+
+- `installed` - the day the add-on was installed (`yyyy-MM-dd`): the date its folder was
+  created on your PC. For a linked add-on, the date of the real folder in the library.
+  If more than 15 add-ons share one date, that day was a move (a new drive, MSFS 2020 to
+  2024), not an install, and the date is left out for all of them.
+- `version` - `package_version` from the add-on's `manifest.json`.
+
+Add-ons from an add-on library are listed like the ones in `Community`: installed is
+installed, switched on or not. No library path is sent.
 
 The list goes to one address, `https://lh-virtual.com/api/tours/scan/upload`, together
 with the code from your My sim page. The code is valid for one hour and can only be
@@ -108,7 +139,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File tests\Test-Engine.ps1
 
 builds a small made-up simulator folder in the temp folder, lets the engine read it and
 checks the result (both scenery layouts, aircraft, liveries, mods, X-Plane, Quick fix,
-the result file). No simulator is needed.
+add-on libraries behind a junction, install date and version, the result file). No
+simulator is needed.
 
 `tools\Build-Zip.ps1` packs the download (`LHV-Scan.zip`).
 

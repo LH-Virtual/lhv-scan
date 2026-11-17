@@ -22,19 +22,23 @@
 #  WHICH FILES ARE OPENED, EXACTLY
 #    UserCfg.opt            one line: where MSFS keeps its add-ons
 #    x-plane_install_NN.txt one line: where X-Plane is installed
-#    manifest.json          type, title, maker, creator of an MSFS add-on
+#    manifest.json          type, title, maker, creator, version of an MSFS add-on
 #    layout.json            the list of file NAMES inside an MSFS add-on
 #    *.bgl                  only the airport codes stored in a scenery file
 #    aircraft.cfg           three lines: aircraft type, title, "is a livery"
 #    apt.dat                the airport codes of an X-Plane scenery
 #    *.acf                  one line: the aircraft type of an X-Plane aircraft
 #
+#  Besides the files, two facts about FOLDERS are looked at: where a linked
+#  add-on folder points to (to find the add-on library behind it), and the
+#  date an add-on folder was created (that is the day it was installed).
+#
 #  Everything is plain text. Lines starting with # are explanations.
 #  Works with the Windows PowerShell that is part of Windows 10 and 11.
 # =============================================================================
 
 # The version of this tool and of the file it writes.
-$script:LhvScanVersion = '1.0.0'
+$script:LhvScanVersion = '1.1.0'
 $script:LhvFileFormat  = 'lhv-addons/2'
 
 # -----------------------------------------------------------------------------
@@ -46,6 +50,12 @@ $script:MaxAirportsPerFile = 20000  # airport records read from one scenery file
 $script:PackSize           = 12     # more airports than this = "a pack", not one airport
 $script:TinyAddonFiles     = 5      # an "airport" with this few files is probably a fix
 $script:ManyTypes          = 8      # more aircraft types than this = traffic models, not one aircraft
+$script:LibraryDepth       = 3      # how many folder levels deep an add-on library is searched
+$script:MovingDayLimit     = 15     # more add-ons "installed" on one day than this = moved, not installed
+$script:MaxVersionLength   = 30     # longest version text that is kept
+
+# The simulator name for a folder you added when no MSFS was found on this PC.
+$script:LhvNoSimName = 'Added folder'
 
 # =============================================================================
 #  PART 1 - AIRPORT CODES INSIDE A SCENERY FILE (.bgl)
@@ -194,23 +204,93 @@ function Read-LhvBglAirports([string]$file) {
 
 # -----------------------------------------------------------------------------
 #  Read-LhvManifest
-#  Reads four fields from an MSFS add-on's manifest.json.
+#  Reads five fields from an MSFS add-on's manifest.json.
+#  "version" is package_version: the maker raises it with every update, so a
+#  changed version means the add-on was updated.
 #  Input : the add-on folder.
-#  Output: @{ type; title; maker; creator } or $null if there is no manifest
-#          (then the folder is not an MSFS add-on).
+#  Output: @{ type; title; maker; creator; version } or $null if there is no
+#          manifest (then the folder is not an MSFS add-on).
 # -----------------------------------------------------------------------------
 function Read-LhvManifest([string]$folder) {
     $path = Join-Path $folder 'manifest.json'
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     try {
         $m = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $version = "$($m.package_version)".Trim()
+        if ($version.Length -gt $script:MaxVersionLength) { $version = $version.Substring(0, $script:MaxVersionLength) }
         return @{ type    = "$($m.content_type)".ToUpper()
                   title   = "$($m.title)"
                   maker   = "$($m.manufacturer)"
-                  creator = "$($m.creator)" }
+                  creator = "$($m.creator)"
+                  version = $version }
     } catch {
         # Broken manifest: we still know it is an add-on, just not which kind.
-        return @{ type = 'UNKNOWN'; title = ''; maker = ''; creator = '' }
+        return @{ type = 'UNKNOWN'; title = ''; maker = ''; creator = ''; version = '' }
+    }
+}
+
+# -----------------------------------------------------------------------------
+#  Get-LhvLinkTarget
+#  Add-on managers (Addons Linker, FSDT Addon Manager ...) keep the add-ons in
+#  a folder of their own and put only a LINK into Community (a "symbolic
+#  link" or a "junction"). Windows follows such a link by itself when a file
+#  inside is read. This function only asks where the link points to.
+#
+#  Input : a folder.
+#  Output: the full path the link points to, or "" if the folder is a normal
+#          folder (or the link cannot be read).
+# -----------------------------------------------------------------------------
+function Get-LhvLinkTarget([string]$folder) {
+    try {
+        # Quick check first: only links carry the "reparse point" mark (0x400).
+        $info = New-Object System.IO.DirectoryInfo($folder)
+        if (([int]$info.Attributes -band 0x400) -eq 0) { return '' }
+        $item = Get-Item -LiteralPath $folder -Force
+        if ($item.LinkType -ne 'SymbolicLink' -and $item.LinkType -ne 'Junction') { return '' }
+        $target = "$(@($item.Target)[0])"
+        if (-not $target) { return '' }
+        # Windows sometimes writes the long-path form (\\?\D:\..., \\?\UNC\server\...).
+        $target = $target -replace '^\\\\\?\\UNC\\', '\\' -replace '^\\(\\|\?)\?\\', ''
+        # A symbolic link may point to a place relative to where the link is.
+        if (-not [System.IO.Path]::IsPathRooted($target)) { $target = Join-Path (Split-Path $folder -Parent) $target }
+        return (ConvertTo-LhvFolderKey $target)
+    } catch {
+        return ''
+    }
+}
+
+# -----------------------------------------------------------------------------
+#  ConvertTo-LhvFolderKey
+#  Writes a folder path in one way only (full path, no "\" at the end), so
+#  that two ways of writing the same folder are recognised as one.
+# -----------------------------------------------------------------------------
+function ConvertTo-LhvFolderKey([string]$path) {
+    $full = [System.IO.Path]::GetFullPath($path)
+    if ($full.Length -gt 3) { $full = $full.TrimEnd('\') }     # keep "D:\" as it is
+    return $full
+}
+
+# -----------------------------------------------------------------------------
+#  Get-LhvInstallDate
+#  The day an add-on was installed: the date its folder was CREATED.
+#  (The dates of the files inside are useless: they come from the maker's
+#  archive, not from your PC. This was checked on a real simulator.)
+#  For a linked add-on the date of the real folder is taken, not the date of
+#  the link: the link is made again whenever the add-on manager switches the
+#  add-on on.
+#
+#  Input : the add-on folder.
+#  Output: the date as yyyy-MM-dd (local time), or "".
+# -----------------------------------------------------------------------------
+function Get-LhvInstallDate([string]$folder) {
+    try {
+        $real = Get-LhvLinkTarget $folder
+        if (-not $real) { $real = $folder }
+        $info = New-Object System.IO.DirectoryInfo($real)
+        if (-not $info.Exists) { return '' }
+        return $info.CreationTime.ToString('yyyy-MM-dd', [System.Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        return ''
     }
 }
 
@@ -373,7 +453,12 @@ function Test-LhvBuiltIn([string]$folderName, [string]$creator) {
 #  One line of the result list. Every add-on becomes exactly one of these.
 #
 #    sim, source, folder    where it was found (never a full path, only names)
+#                           source: community, marketplace, library,
+#                           aircraft-folder or custom-scenery
 #    type, title, maker, creator   from manifest.json (MSFS)
+#    version   package_version from manifest.json (MSFS), "" if not known
+#    installed the day the add-on folder was created, yyyy-MM-dd, "" if not
+#              known (see Get-LhvInstallDate and Clear-LhvMovingDay)
 #    kind      airport | aircraft | livery | mod | library | traffic |
 #              navdata | tool | other
 #    detail    a short label, e.g. "Tree fix"
@@ -388,6 +473,7 @@ function New-LhvEntry([string]$sim, [string]$source, [string]$folder) {
     return [ordered]@{
         sim = $sim; source = $source; folder = $folder
         type = ''; title = ''; maker = ''; creator = ''
+        version = ''; installed = ''
         kind = 'other'; detail = ''
         icaos = @(); aircraftTypes = @()
         certain = $true; fixed = $false; note = ''
@@ -404,7 +490,8 @@ function New-LhvEntry([string]$sim, [string]$source, [string]$folder) {
 #    3. *.bgl          -> airport codes inside the scenery
 #    4. the name       -> tree fix, library, traffic ... (only if 2 and 3 found nothing)
 #
-#  Input : full folder path, simulator name, "community" or "marketplace".
+#  Input : full folder path, simulator name, "community", "marketplace" or
+#          "library".
 #  Output: one entry (see New-LhvEntry), or $null if the folder is not an
 #          add-on or belongs to the simulator itself.
 # -----------------------------------------------------------------------------
@@ -417,6 +504,8 @@ function Read-LhvMsfsAddon([string]$folder, [string]$sim, [string]$source) {
     $e = New-LhvEntry $sim $source $name
     $e.type = $manifest.type; $e.title = $manifest.title
     $e.maker = $manifest.maker; $e.creator = $manifest.creator
+    $e.version = $manifest.version
+    $e.installed = Get-LhvInstallDate $folder
 
     # What the name says. Used to tell a real aircraft or airport from
     # traffic models, libraries and parts that carry the same kind of files.
@@ -674,28 +763,176 @@ function Get-LhvSimulators {
 }
 
 # -----------------------------------------------------------------------------
+#  Get-LhvLibraries
+#  Finds the add-on LIBRARIES: folders outside the simulator where you keep
+#  add-ons. An add-on manager puts only the add-ons that are switched ON into
+#  Community, as links; the ones switched OFF stay in its library and would
+#  be missed. They are still installed on your PC, so they are read too.
+#
+#  Two ways a folder becomes a library:
+#    1. A linked add-on in a Community folder points into it: the folder
+#       that CONTAINS the real add-on is the library.
+#    2. You added it yourself ("Add folder" in the window, kept in
+#       %APPDATA%\LHV-Scan\libraries.json). It belongs to MSFS 2024 if that
+#       is on this PC, else to MSFS 2020.
+#  Each library is listed once, even if many links point into it. It belongs
+#  to the simulator whose Community folder linked into it first.
+#
+#  A whole drive (D:\) is never taken as a library from a link: that would
+#  search the entire drive. You can still add one yourself.
+#
+#  Input : -Simulators   the list from Get-LhvSimulators (or a part of it)
+#          -UserFolders  the folders you added (default: libraries.json)
+#  Output: a list of @{ path; sim; fromUser; read; addons; linked }.
+#          read, addons and linked are filled in by Invoke-LhvScan.
+# -----------------------------------------------------------------------------
+function Get-LhvLibraries {
+    param($Simulators, [string[]]$UserFolders = (Read-LhvLibraryFolders))
+
+    $libraries = New-Object System.Collections.Generic.List[object]
+    $known = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    # The simulator's own folders are read anyway. They are never a library.
+    foreach ($sim in @($Simulators)) {
+        foreach ($place in @($sim.places)) {
+            try { [void]$known.Add((ConvertTo-LhvFolderKey $place.path)) } catch { }
+        }
+    }
+
+    # 1. Libraries behind the links in Community.
+    foreach ($sim in @($Simulators)) {
+        foreach ($place in @($sim.places)) {
+            if ($place.kind -ne 'msfs' -or $place.source -ne 'community') { continue }
+            try { $dirs = [System.IO.Directory]::GetDirectories($place.path) } catch { continue }
+            foreach ($dir in $dirs) {
+                $target = Get-LhvLinkTarget $dir
+                if (-not $target) { continue }
+                $parent = Split-Path $target -Parent
+                if (-not $parent -or -not (Split-Path $parent -Parent)) { continue }    # a whole drive
+                if (-not (Test-Path -LiteralPath $parent)) { continue }
+                $key = ConvertTo-LhvFolderKey $parent
+                if ($known.Add($key)) {
+                    $libraries.Add(@{ path = $key; sim = $sim.name; fromUser = $false; read = $false; addons = 0; linked = 0 })
+                }
+            }
+        }
+    }
+
+    # 2. The folders you added yourself.
+    $msfs = @(@($Simulators) | Where-Object { $_.id -eq 'msfs2024' }) + @(@($Simulators) | Where-Object { $_.id -eq 'msfs2020' })
+    $userSim = $script:LhvNoSimName
+    if ($msfs.Count -gt 0) { $userSim = $msfs[0].name }
+    foreach ($folder in @($UserFolders)) {
+        if (-not $folder) { continue }
+        try {
+            if (-not (Test-Path -LiteralPath $folder -PathType Container)) { continue }
+            $key = ConvertTo-LhvFolderKey $folder
+            if ($known.Add($key)) {
+                $libraries.Add(@{ path = $key; sim = $userSim; fromUser = $true; read = $false; addons = 0; linked = 0 })
+            }
+        } catch { }
+    }
+    return $libraries.ToArray()
+}
+
+# -----------------------------------------------------------------------------
+#  Find-LhvLibraryAddons
+#  Lists the add-on folders inside a library. An add-on folder is one that
+#  contains manifest.json. Libraries are often sorted into sub-folders
+#  ("Airports\Germany\..."), so the search goes up to $script:LibraryDepth
+#  levels deep. It does not look inside an add-on folder: an add-on never
+#  contains another add-on.
+#
+#  Input : the library folder.
+#  Output: full paths of the add-on folders.
+# -----------------------------------------------------------------------------
+function Find-LhvLibraryAddons([string]$library) {
+    $found = New-Object System.Collections.Generic.List[string]
+    $level = @($library)
+    for ($depth = 1; $depth -le $script:LibraryDepth -and $level.Count -gt 0; $depth++) {
+        $next = New-Object System.Collections.Generic.List[string]
+        foreach ($parent in $level) {
+            try { $dirs = [System.IO.Directory]::GetDirectories($parent) } catch { continue }
+            foreach ($dir in $dirs) {
+                if ([System.IO.File]::Exists((Join-Path $dir 'manifest.json'))) { $found.Add($dir) }
+                else { $next.Add($dir) }
+            }
+        }
+        $level = $next.ToArray()
+    }
+    return $found.ToArray()
+}
+
+# -----------------------------------------------------------------------------
+#  Clear-LhvMovingDay
+#  When you move your add-ons (to a new drive, or from MSFS 2020 to 2024),
+#  every folder gets a new creation date: the day of the move. That day is
+#  not an install date. So: if more than $script:MovingDayLimit add-ons share
+#  one date, that date is removed from all of them.
+#
+#  Input : the entries of the whole scan. They are changed in place.
+# -----------------------------------------------------------------------------
+function Clear-LhvMovingDay($entries) {
+    # "foreach ($e in $entries)", not "@($entries)": Windows PowerShell 5.1
+    # fails on @() around a list of entries ("argument types do not match").
+    $perDay = @{}
+    foreach ($e in $entries) {
+        if ($e.installed) { $perDay[$e.installed] = 1 + [int]$perDay[$e.installed] }
+    }
+    foreach ($e in $entries) {
+        if ($e.installed -and $perDay[$e.installed] -gt $script:MovingDayLimit) { $e.installed = '' }
+    }
+}
+
+# -----------------------------------------------------------------------------
 #  Invoke-LhvScan
-#  Walks through the given simulators and reads every add-on folder.
+#  Walks through the given simulators and libraries and reads every add-on
+#  folder.
+#
+#  An add-on in a library whose folder NAME is also in a Community folder is
+#  the same add-on, switched on through a link. It was read from Community
+#  already, so it is only counted as "linked", not read twice.
 #
 #  Input : -Simulators  the list from Get-LhvSimulators (or a part of it)
+#          -Libraries   optional: the list from Get-LhvLibraries. Its
+#                       read, addons and linked are filled in here.
 #          -OnProgress  optional: a script block called for every folder, with
 #                       (done, total, simName, folderName). The window uses
 #                       it to show what is being read right now.
 #  Output: the list of entries (see New-LhvEntry).
 # -----------------------------------------------------------------------------
 function Invoke-LhvScan {
-    param([Parameter(Mandatory = $true)] $Simulators, [scriptblock] $OnProgress)
+    param([Parameter(Mandatory = $true)] [AllowEmptyCollection()] $Simulators, $Libraries = @(), [scriptblock] $OnProgress)
 
     # First collect all folders, so the progress bar knows the total.
     $jobs = New-Object System.Collections.Generic.List[object]
-    foreach ($sim in $Simulators) {
-        foreach ($place in $sim.places) {
+    $inCommunity = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($sim in @($Simulators)) {
+        foreach ($place in @($sim.places)) {
             try {
                 foreach ($dir in [System.IO.Directory]::GetDirectories($place.path)) {
                     $jobs.Add(@{ sim = $sim.name; place = $place; dir = $dir })
+                    if ($place.kind -eq 'msfs' -and $place.source -eq 'community') { [void]$inCommunity.Add((Split-Path $dir -Leaf)) }
                 }
             } catch { }
         }
+    }
+
+    # Then the add-ons in the libraries.
+    $libraryPlace = @{ source = 'library'; kind = 'msfs' }
+    $seenPaths = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $seenNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    foreach ($library in @($Libraries)) {
+        if (-not $library) { continue }
+        $library.addons = 0; $library.linked = 0
+        foreach ($dir in @(Find-LhvLibraryAddons $library.path)) {
+            if (-not $seenPaths.Add($dir)) { continue }                        # found through another library already
+            $library.addons++
+            $name = Split-Path $dir -Leaf
+            if ($inCommunity.Contains($name)) { $library.linked++; continue }  # switched on: read from Community
+            if (-not $seenNames.Add($name)) { continue }                       # the same add-on in two libraries: read once
+            $jobs.Add(@{ sim = $library.sim; place = $libraryPlace; dir = $dir })
+        }
+        $library.read = $true
     }
 
     $entries = New-Object System.Collections.Generic.List[object]
@@ -711,6 +948,7 @@ function Invoke-LhvScan {
         }
         if ($entry) { $entries.Add($entry) }
     }
+    Clear-LhvMovingDay $entries
     return $entries.ToArray()
 }
 
@@ -768,6 +1006,50 @@ function Save-LhvFixes($fixes, [string]$file = (Get-LhvFixFile)) {
 }
 
 # -----------------------------------------------------------------------------
+#  Get-LhvLibraryFile
+#  Where the add-on folders you added yourself are remembered:
+#      C:\Users\<you>\AppData\Roaming\LHV-Scan\libraries.json
+#  It is a plain list of folder paths. It stays on your PC and is never sent.
+# -----------------------------------------------------------------------------
+function Get-LhvLibraryFile {
+    return (Join-Path $env:APPDATA 'LHV-Scan\libraries.json')
+}
+
+# -----------------------------------------------------------------------------
+#  Read-LhvLibraryFolders
+#  Loads the folders you added. Anything that is not a full path is ignored.
+#  Output: a list of folder paths (each once).
+# -----------------------------------------------------------------------------
+function Read-LhvLibraryFolders([string]$file = (Get-LhvLibraryFile)) {
+    $folders = New-Object System.Collections.Generic.List[string]
+    if (Test-Path -LiteralPath $file) {
+        try {
+            $data = Get-Content -LiteralPath $file -Raw -Encoding UTF8 | ConvertFrom-Json
+            foreach ($item in @($data)) {
+                $path = "$item".Trim()
+                if (-not $path -or -not [System.IO.Path]::IsPathRooted($path)) { continue }
+                if (@($folders | Where-Object { $_ -eq $path }).Count -gt 0) { continue }   # -eq ignores case
+                $folders.Add($path)
+            }
+        } catch { }
+    }
+    return $folders.ToArray()
+}
+
+# -----------------------------------------------------------------------------
+#  Save-LhvLibraryFolders
+#  Writes the folders you added to the file from Get-LhvLibraryFile.
+# -----------------------------------------------------------------------------
+function Save-LhvLibraryFolders($folders, [string]$file = (Get-LhvLibraryFile)) {
+    $list = @(@($folders) | Where-Object { $_ } | ForEach-Object { "$_" })
+    $dir = Split-Path $file -Parent
+    if (-not (Test-Path -LiteralPath $dir)) { [void](New-Item -ItemType Directory -Path $dir) }
+    # -InputObject keeps a list of one folder a list (piping would unwrap it).
+    $json = ConvertTo-Json -InputObject $list
+    [System.IO.File]::WriteAllText($file, $json, (New-Object System.Text.UTF8Encoding($false)))
+}
+
+# -----------------------------------------------------------------------------
 #  Set-LhvFix
 #  Applies ONE correction to an entry, e.g. "this is the airport EDDK".
 #  Input : the entry, the kind you chose, and the codes you typed.
@@ -807,8 +1089,11 @@ function Use-LhvFixes($entries, $fixes) {
 #  Only what LH Virtual needs goes in:
 #    - the airports and aircraft that are clear (read from the add-on's own
 #      files, or fixed by you), each with: simulator name, folder NAME, title,
-#      maker, airport codes or aircraft types
+#      maker, airport codes or aircraft types, and - only when known - the
+#      install date ("installed") and the add-on's version ("version")
 #    - for everything else just a COUNT per kind ("103 liveries, 21 mods")
+#  Add-ons from a library are listed like the ones in Community: installed
+#  is installed, switched on or not.
 #
 #  It contains no folder paths, no user name and nothing about your PC.
 #  Liveries, mods, libraries, tools and unclear add-ons are not listed by name.
@@ -835,12 +1120,17 @@ function ConvertTo-LhvAddonFile($entries) {
         count     = $counted.Count
         notListed = $notListed
         addons    = @($counted | ForEach-Object {
-            [ordered]@{
+            $item = [ordered]@{
                 sim = $_.sim; folder = $_.folder; title = $_.title; maker = $_.maker
                 kind = $_.kind
                 icaos = @($_.icaos); aircraftTypes = @($_.aircraftTypes)
                 fixed = [bool]$_.fixed
             }
+            # Optional fields: left out when not known, so older receivers
+            # see exactly the format they know.
+            if ("$($_.installed)") { $item['installed'] = "$($_.installed)" }
+            if ("$($_.version)")   { $item['version']   = "$($_.version)" }
+            $item
         })
     }
     return ($result | ConvertTo-Json -Depth 6)
